@@ -1,0 +1,14 @@
+# deps / build output
+node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/schemas/
+
+# env / local
+.env
+.env.*
+*.log
+.DS_Store
+
+# app assets are synced from core/ at build time (scripts/sync-core-assets.mjs)
+app/src/assets/cofounder/
