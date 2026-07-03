@@ -1,0 +1,177 @@
+{
+  "$comment": "Per-role suggested connectors for Cofounder. 'builtin':true entries are Hermes tools/toolsets available with no setup (verified in /Users/sahil/.hermes/hermes-agent/toolsets.py and tools/). 'builtin':false entries are external services; 'catalog_id' is set only when the entry exists in the real Nous MCP catalog (verified via GET /api/mcp/catalog, backed by /Users/sahil/.hermes/hermes-agent/optional-mcps/*/manifest.yaml — as of this install that catalog contains only linear, n8n, unreal-engine). All other external connectors have 'catalog_id': null and must be added by the founder via POST /api/mcp/servers (name/url or command+args+env) or the MCP server's own OAuth/API-key setup — Cofounder does not ship credentials.",
+  "roles": {
+    "marketing": [
+      {
+        "id": "browser",
+        "name": "Browser",
+        "why": "Review competitor sites, landing pages, and live SERPs while drafting campaigns and copy.",
+        "builtin": true
+      },
+      {
+        "id": "web_search",
+        "name": "Web Search",
+        "why": "Trend and market research to ground content and campaign decisions.",
+        "builtin": true
+      },
+      {
+        "id": "google-analytics",
+        "name": "Google Analytics",
+        "why": "Pull real traffic/conversion numbers for campaign performance reporting instead of estimating.",
+        "builtin": false,
+        "catalog_id": null
+      },
+      {
+        "id": "mailchimp",
+        "name": "Mailchimp",
+        "why": "Send and track email campaigns, manage lists/segments.",
+        "builtin": false,
+        "catalog_id": null
+      },
+      {
+        "id": "linkedin-ads",
+        "name": "LinkedIn Ads",
+        "why": "Manage and report on B2B ad campaigns where the ICP lives on LinkedIn.",
+        "builtin": false,
+        "catalog_id": null
+      },
+      {
+        "id": "xurl",
+        "name": "X (Twitter) via xurl",
+        "why": "Post and monitor social content; already available as a bundled Hermes skill (~/.hermes/skills/social-media/xurl).",
+        "builtin": false,
+        "catalog_id": null
+      }
+    ],
+    "research": [
+      {
+        "id": "browser",
+        "name": "Browser",
+        "why": "Primary research tool — live site visits, SERP review, screenshots.",
+        "builtin": true
+      },
+      {
+        "id": "web_search",
+        "name": "Web Search",
+        "why": "Broad discovery before narrowing to specific sources.",
+        "builtin": true
+      },
+      {
+        "id": "arxiv-skill",
+        "name": "arXiv (bundled skill)",
+        "why": "Academic/technical research — already bundled at ~/.hermes/skills/research/arxiv.",
+        "builtin": true
+      },
+      {
+        "id": "blogwatcher-skill",
+        "name": "Blogwatcher (bundled skill)",
+        "why": "RSS/blog monitoring for ongoing competitor or industry trend tracking — bundled at ~/.hermes/skills/research/blogwatcher.",
+        "builtin": true
+      },
+      {
+        "id": "prospecting-skill",
+        "name": "Prospecting (bundled skill)",
+        "why": "Community lead scanning (Reddit/forums) — bundled at ~/.hermes/skills/research/prospecting.",
+        "builtin": true
+      },
+      {
+        "id": "data-enrichment",
+        "name": "Company/People Data Enrichment (e.g. Lusha, Clearbit)",
+        "why": "Structured company and contact intel beyond what web search surfaces.",
+        "builtin": false,
+        "catalog_id": null
+      }
+    ],
+    "support": [
+      {
+        "id": "gateway",
+        "name": "Gateway (multi-platform messaging)",
+        "why": "Receive and reply to customer messages across configured platforms (email, chat, Telegram, etc.).",
+        "builtin": true
+      },
+      {
+        "id": "email-skill",
+        "name": "Email (bundled skill)",
+        "why": "Send/search/manage email from the terminal — bundled at ~/.hermes/skills/email.",
+        "builtin": true
+      },
+      {
+        "id": "zendesk",
+        "name": "Zendesk",
+        "why": "Ticketing system of record for support triage and escalation once support volume outgrows workspace .md files.",
+        "builtin": false,
+        "catalog_id": null
+      },
+      {
+        "id": "intercom",
+        "name": "Intercom",
+        "why": "Alternative ticketing/live-chat CRM for support, common for SaaS founders.",
+        "builtin": false,
+        "catalog_id": null
+      },
+      {
+        "id": "hubspot",
+        "name": "HubSpot (CRM)",
+        "why": "Unified customer record if support needs to see sales/marketing history for context.",
+        "builtin": false,
+        "catalog_id": null
+      }
+    ],
+    "operations": [
+      {
+        "id": "google-workspace",
+        "name": "Google Workspace (Calendar, Docs, Sheets)",
+        "why": "Calendar management and shared docs/sheets for scheduling and reporting.",
+        "builtin": false,
+        "catalog_id": null
+      },
+      {
+        "id": "cron",
+        "name": "Cron",
+        "why": "Schedule recurring operations tasks (weekly digests, monthly reports) via Hermes's built-in cronjob tool.",
+        "builtin": true
+      },
+      {
+        "id": "kanban",
+        "name": "Kanban",
+        "why": "Track Tasks/Initiatives across roles and produce cross-role status rollups from Hermes's built-in board.",
+        "builtin": true
+      },
+      {
+        "id": "linear",
+        "name": "Linear",
+        "why": "Issue/project tracking if operations work extends into engineering process management. Present in the real Nous MCP catalog with native OAuth.",
+        "builtin": false,
+        "catalog_id": "linear"
+      }
+    ],
+    "finance": [
+      {
+        "id": "stripe",
+        "name": "Stripe",
+        "why": "Revenue, subscription, and payment data — the most common billing system for early-stage founders.",
+        "builtin": false,
+        "catalog_id": null
+      },
+      {
+        "id": "quickbooks",
+        "name": "QuickBooks",
+        "why": "Bookkeeping, invoicing, and expense tracking system of record.",
+        "builtin": false,
+        "catalog_id": null
+      },
+      {
+        "id": "xero",
+        "name": "Xero",
+        "why": "Alternative accounting/invoicing platform to QuickBooks.",
+        "builtin": false,
+        "catalog_id": null
+      }
+    ]
+  },
+  "notes": [
+    "As of this Hermes install (v0.17.0), GET /api/mcp/catalog (see hermes_cli/mcp_catalog.py, backed by /Users/sahil/.hermes/hermes-agent/optional-mcps/) only ships linear, n8n, and unreal-engine as pre-approved manifests. Every other connector listed above (Stripe, Mailchimp, QuickBooks, HubSpot, Google Workspace, Zendesk, Intercom, Xero, LinkedIn Ads, Google Analytics, xurl beyond the bundled skill, data enrichment) has no catalog manifest yet and must be added manually via POST /api/mcp/servers with an explicit url/command or via the connector's own OAuth flow if Hermes supports it as an oauth provider (see /api/oauth/providers).",
+    "'builtin' entries marked true for bundled Hermes *skills* (arxiv, blogwatcher, prospecting, email, xurl) mean the skill ships with Hermes and needs no external credential to load — but the underlying data source (e.g. Reddit, X) may still need its own auth (browser cookies, API keys) as documented inside each SKILL.md.",
+    "This file is intentionally suggestions, not an install manifest — bootstrap.md does not auto-install any external MCP connector; the founder chooses which to connect."
+  ]
+}
