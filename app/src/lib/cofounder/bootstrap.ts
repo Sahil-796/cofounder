@@ -506,6 +506,15 @@ export function renderRoleSoul(role: string, workspaceRoot: string, companyName?
     "",
     "Never claim or work a task assigned to a different profile.",
     "",
+    "The founder can also ask you to work a board task from an ordinary chat message —" +
+      ' either by name ("work on this task: <title>") or via inline context that shows up' +
+      ' as `[task: "Title" · status: <status> · id: <id>]`. Either way, if you\'re actually' +
+      " about to do the work, treat it exactly like a dispatch: resolve the task's id" +
+      " (`kanban_list` if you weren't given one), `kanban_claim` it BEFORE you start (it" +
+      " must be ready — if it's not, say so instead of doing the work off-board), then" +
+      " follow steps 2-4 above. Don't just reply in chat and leave the board status stale —" +
+      " the claim is what makes the board reflect that you're actually on it.",
+    "",
   ].join("\n");
   const env = [
     "",
