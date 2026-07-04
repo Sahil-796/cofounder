@@ -11,7 +11,12 @@ import RightPanel, { type PanelTab } from "./RightPanel";
 import Onboarding from "./Onboarding";
 import { initConnection } from "@/state/connection";
 import { loadConfig, type CofounderConfig } from "@/lib/cofounder/config";
-import { cofounderProfileExists, ensureSoulCurrent } from "@/lib/cofounder/bootstrap";
+import {
+  cofounderProfileExists,
+  ensureSoulCurrent,
+  ensureRoleProfilesCurrent,
+} from "@/lib/cofounder/bootstrap";
+import { startKanbanDispatchLoop } from "@/lib/cofounder/dispatch";
 import { useChat } from "@/state/chat";
 import { hermesRest } from "@/lib/hermes";
 
@@ -82,11 +87,21 @@ export default function AppShell() {
   }, []);
 
   // Once ready, make sure the live SOUL carries the configured workspace root
-  // (heals installs bootstrapped before the SOUL embedded it). Best-effort.
+  // (heals installs bootstrapped before the SOUL embedded it), and that every
+  // role has its own real Hermes profile (heals installs from before role
+  // agents were split off the shared cofounder profile — see bootstrap.ts's
+  // ROLE_PROFILE_PREFIX comment for why that split is what makes delegation
+  // real). Both are idempotent and best-effort.
   useEffect(() => {
     if (gate !== "ready" || !config?.workspaceRoot) return;
     void ensureSoulCurrent(config.workspaceRoot).catch(() => {});
-  }, [gate, config?.workspaceRoot]);
+    void ensureRoleProfilesCurrent(config.workspaceRoot, config.companyName).catch(() => {});
+  }, [gate, config?.workspaceRoot, config?.companyName]);
+
+  // The kanban dispatcher doesn't run on its own (see dispatch.ts) — tick it
+  // for the lifetime of the app so tasks assigned to a role profile actually
+  // get worked, regardless of which tab is open.
+  useEffect(() => startKanbanDispatchLoop(), []);
 
   // Once ready, try to populate canvas artifact cards from the workspace.
   useEffect(() => {

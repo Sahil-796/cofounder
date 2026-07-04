@@ -3,11 +3,22 @@
  * required; assignee is a role dropdown from roles.ts; description and priority
  * are optional (both supported by `hermes kanban create`). On success it calls
  * onCreated so the board can refresh instantly.
+ *
+ * Three creation actions, all of which create the task first:
+ *  - "Create & run now" — also nudges the assigned role's chat to start work.
+ *  - "Create & consult Cofounder" — also switches to the Cofounder chat and
+ *    asks it to route/kick off the task.
+ *  - "Just create" — board-only, no chat action (previous default behavior).
+ * Chat actions reuse the existing chat store (state/chat.ts) — this file only
+ * calls its public actions, it does not modify that store.
  */
 
 import { useState } from "react";
 import { ROLES } from "@/lib/cofounder/roles";
 import { createKanbanTask } from "@/lib/cofounder/extraRest";
+import { useChat } from "@/state/chat";
+
+type CreateMode = "run" | "consult" | "plain";
 
 export default function NewTaskModal({
   onClose,
@@ -20,27 +31,47 @@ export default function NewTaskModal({
   const [assignee, setAssignee] = useState("");
   const [body, setBody] = useState("");
   const [priority, setPriority] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [submitting, setSubmitting] = useState<CreateMode | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const canSubmit = title.trim().length > 0 && !submitting;
 
-  const submit = async () => {
+  const submit = async (mode: CreateMode) => {
     if (!canSubmit) return;
-    setSubmitting(true);
+    setSubmitting(mode);
     setError(null);
     try {
+      const trimmedTitle = title.trim();
       await createKanbanTask({
-        title,
+        title: trimmedTitle,
         assignee: assignee || undefined,
         body: body || undefined,
         priority: priority.trim() ? Number(priority) : undefined,
       });
       onCreated();
+      if (mode === "run" && assignee) {
+        const desc = body.trim();
+        void useChat
+          .getState()
+          .sendTo(
+            assignee,
+            `Work on this task: ${trimmedTitle}` + (desc ? ` — ${desc}` : ""),
+          );
+      } else if (mode === "consult") {
+        useChat.getState().setActiveAgent("cofounder");
+        void useChat
+          .getState()
+          .sendTo(
+            "cofounder",
+            `I created a task "${trimmedTitle}" assigned to ${
+              assignee || "no one yet"
+            }. Route/kick it off as you see fit.`,
+          );
+      }
       onClose();
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
-      setSubmitting(false);
+      setSubmitting(null);
     }
   };
 
@@ -58,7 +89,7 @@ export default function NewTaskModal({
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit();
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit("plain");
           }}
           placeholder="What needs doing?"
           className="mb-3 w-full rounded-lg border border-[#26272c] bg-[#0f1012] px-2.5 py-1.5 text-[13px] text-[#e4e4e8] outline-none placeholder:text-[#54545c] focus:border-[#3a3b42]"
@@ -108,20 +139,37 @@ export default function NewTaskModal({
           </div>
         )}
 
-        <div className="flex justify-end gap-2">
+        <div className="flex flex-col gap-1.5">
           <button
-            onClick={onClose}
-            className="rounded-lg px-3 py-1.5 text-[12.5px] text-[#8a8a92] transition hover:text-[#c7c7cd]"
+            onClick={() => void submit("run")}
+            disabled={!canSubmit || !assignee}
+            title={assignee ? "" : "Assign a role first"}
+            className="w-full rounded-lg bg-[#e8c37a] px-3 py-1.5 text-[12.5px] font-medium text-[#1a1508] transition hover:bg-[#f0cd88] disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Cancel
+            {submitting === "run" ? "Creating…" : "Create & run now"}
           </button>
           <button
-            onClick={() => void submit()}
+            onClick={() => void submit("consult")}
             disabled={!canSubmit}
-            className="rounded-lg bg-[#e8c37a] px-3 py-1.5 text-[12.5px] font-medium text-[#1a1508] transition hover:bg-[#f0cd88] disabled:cursor-not-allowed disabled:opacity-40"
+            className="w-full rounded-lg border border-[#2e2f34] bg-[#1a1b1f] px-3 py-1.5 text-[12.5px] font-medium text-[#e4e4e8] transition hover:bg-[#202127] disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {submitting ? "Creating…" : "Create task"}
+            {submitting === "consult" ? "Creating…" : "Create & consult Cofounder"}
           </button>
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <button
+              onClick={onClose}
+              className="rounded-lg px-3 py-1.5 text-[12.5px] text-[#8a8a92] transition hover:text-[#c7c7cd]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => void submit("plain")}
+              disabled={!canSubmit}
+              className="rounded-lg px-3 py-1.5 text-[12.5px] font-medium text-[#8a8a92] transition hover:text-[#c7c7cd] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {submitting === "plain" ? "Creating…" : "Just create"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

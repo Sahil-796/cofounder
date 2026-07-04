@@ -304,54 +304,230 @@ function MessageBubble({
       )}
 
       {m.clarify && (
-        <div className="rounded-xl border-2 border-[#c99b4e]/70 bg-[#1a1710] p-3 shadow-[0_0_0_3px_rgba(201,155,78,0.08)]">
-          <div className="mb-2 flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[#e8c37a]/90">
-            <span>{agentLabel} needs your input</span>
-          </div>
-          <div className="mb-2 text-[13px] text-[#eaeaee]">{m.clarify.question}</div>
-          {m.clarify.choices.length > 0 ? (
-            <div className="flex flex-wrap gap-2">
-              {m.clarify.choices.map((c) => (
-                <button
-                  key={c}
-                  onClick={() => onClarify(m.clarify!.requestId, c)}
-                  className="rounded-full border border-[#c99b4e]/50 bg-[#2a2213]/60 px-3 py-1.5 text-[12px] text-[#f0dcae] transition hover:border-[#c99b4e] hover:bg-[#332a17]"
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <InlineClarifyInput onSubmit={(v) => onClarify(m.clarify!.requestId, v)} />
-          )}
-        </div>
+        <ClarifyCard
+          agentLabel={agentLabel}
+          clarify={m.clarify}
+          onSubmit={(v) => onClarify(m.clarify!.requestId, v)}
+        />
       )}
 
-      {m.approval && (
-        <div className="rounded-xl border-2 border-amber-600/60 bg-amber-950/25 p-3 shadow-[0_0_0_3px_rgba(217,119,6,0.08)]">
-          <div className="mb-1 text-[11px] uppercase tracking-wide text-amber-400/90">
-            Approval needed
-          </div>
-          <code className="mb-2 block overflow-x-auto rounded-md bg-black/40 px-2.5 py-1.5 text-[12px] text-amber-200">
-            {m.approval.command}
-          </code>
-          <div className="flex gap-2">
+      {m.approval && <ApprovalCard approval={m.approval} onApprove={onApprove} onDeny={onDeny} />}
+    </div>
+  );
+}
+
+/**
+ * Claude-Code-style clarify prompt: a vertical numbered list of choices,
+ * navigable with ↑/↓, jumpable with number keys 1-9, confirmable with Enter,
+ * plus an always-present "type your own answer" row that reveals a text
+ * input. With zero choices we skip straight to the text input (as before).
+ */
+function ClarifyCard({
+  agentLabel,
+  clarify,
+  onSubmit,
+}: {
+  agentLabel: string;
+  clarify: import("@/state/chat").ClarifyPrompt;
+  onSubmit: (v: string) => void;
+}) {
+  const { choices } = clarify;
+  const hasChoices = choices.length > 0;
+  // Index into a virtual list of [...choices, "type your own"]. Starts at 0
+  // (first choice) so arrow keys work immediately; the custom row is the
+  // last index.
+  const customIndex = choices.length;
+  const [selected, setSelected] = useState(0);
+  const [customOpen, setCustomOpen] = useState(!hasChoices);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // Focus the card so it captures arrow/number/enter keys without
+    // requiring a click first.
+    containerRef.current?.focus();
+  }, []);
+
+  const choose = (i: number) => {
+    if (i === customIndex) {
+      setSelected(customIndex);
+      setCustomOpen(true);
+      return;
+    }
+    onSubmit(choices[i]);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (!hasChoices) return; // plain text input handles its own keys
+    if (customOpen) {
+      // While the custom input is focused/open, only Escape falls back to
+      // the list — the input itself owns Enter.
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setCustomOpen(false);
+        containerRef.current?.focus();
+      }
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSelected((i) => Math.min(i + 1, customIndex));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelected((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      choose(selected);
+    } else if (/^[1-9]$/.test(e.key)) {
+      const idx = Number(e.key) - 1;
+      if (idx < choices.length) {
+        e.preventDefault();
+        setSelected(idx);
+        choose(idx);
+      }
+    }
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      tabIndex={-1}
+      onKeyDown={onKeyDown}
+      className="rounded-xl border-2 border-[#c99b4e]/70 bg-[#1a1710] p-3 shadow-[0_0_0_3px_rgba(201,155,78,0.08)] outline-none"
+    >
+      <div className="mb-2 flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[#e8c37a]/90">
+        <span>{agentLabel} needs your input</span>
+      </div>
+      <div className="mb-2 text-[13px] text-[#eaeaee]">{clarify.question}</div>
+
+      {hasChoices ? (
+        <div className="flex flex-col gap-1">
+          {choices.map((c, i) => (
             <button
-              onClick={onApprove}
-              autoFocus
-              className="rounded-md bg-emerald-600/90 px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-emerald-600"
+              key={c}
+              onClick={() => {
+                setSelected(i);
+                choose(i);
+              }}
+              onMouseEnter={() => setSelected(i)}
+              className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12.5px] transition ${
+                selected === i && !customOpen
+                  ? "bg-[#332a17] text-[#f5e6c2] ring-1 ring-[#c99b4e]/70"
+                  : "text-[#e8dcc0]/90 hover:bg-[#241f12]"
+              }`}
             >
-              Approve
+              <span className="w-4 shrink-0 text-right text-[11px] text-[#c99b4e]/80">
+                {i + 1}.
+              </span>
+              <span className="flex-1">{c}</span>
             </button>
-            <button
-              onClick={onDeny}
-              className="rounded-md border border-[#3a3b42] px-3 py-1.5 text-[12px] text-[#d0d0d6] transition hover:bg-[#26272c]"
-            >
-              Deny
-            </button>
+          ))}
+          <button
+            onClick={() => {
+              setSelected(customIndex);
+              setCustomOpen(true);
+            }}
+            onMouseEnter={() => setSelected(customIndex)}
+            className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12.5px] transition ${
+              selected === customIndex && customOpen
+                ? "bg-[#332a17] text-[#f5e6c2] ring-1 ring-[#c99b4e]/70"
+                : "text-[#a89a78] hover:bg-[#241f12]"
+            }`}
+          >
+            <span className="w-4 shrink-0 text-right text-[11px] text-[#c99b4e]/60">
+              {customIndex + 1}.
+            </span>
+            <span className="flex-1 italic">Or type your own answer…</span>
+          </button>
+          {customOpen && (
+            <div className="mt-1 pl-6">
+              <InlineClarifyInput
+                onSubmit={onSubmit}
+                onCancel={() => {
+                  setCustomOpen(false);
+                  setSelected(0);
+                  containerRef.current?.focus();
+                }}
+              />
+            </div>
+          )}
+          <div className="mt-1 px-2.5 text-[10.5px] text-[#8a7c5a]">
+            ↑↓ to move · number to jump · enter to select
           </div>
         </div>
+      ) : (
+        <InlineClarifyInput onSubmit={onSubmit} />
       )}
+    </div>
+  );
+}
+
+/**
+ * Approval card: the raw command can be arbitrarily long (multi-line shell
+ * scripts, heredocs), so we show a capped preview and let the founder expand
+ * it — mirroring how Claude Code collapses long bash commands behind a
+ * "Show full" toggle.
+ */
+const APPROVAL_PREVIEW_LIMIT = 200;
+
+function ApprovalCard({
+  approval,
+  onApprove,
+  onDeny,
+}: {
+  approval: import("@/state/chat").ApprovalPrompt;
+  onApprove: () => void;
+  onDeny: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const command = approval.command;
+  const firstLine = command.split("\n")[0] ?? command;
+  const isMultiline = command.includes("\n");
+  const isLong = command.length > APPROVAL_PREVIEW_LIMIT || isMultiline;
+  const preview =
+    firstLine.length > APPROVAL_PREVIEW_LIMIT
+      ? firstLine.slice(0, APPROVAL_PREVIEW_LIMIT) + "…"
+      : firstLine + (isMultiline ? " …" : "");
+
+  return (
+    <div className="rounded-xl border-2 border-amber-600/60 bg-amber-950/25 p-3 shadow-[0_0_0_3px_rgba(217,119,6,0.08)]">
+      <div className="mb-1 text-[11px] uppercase tracking-wide text-amber-400/90">
+        Approval needed
+      </div>
+
+      {expanded ? (
+        <code className="mb-1.5 block max-h-56 overflow-auto rounded-md bg-black/40 px-2.5 py-1.5 text-[12px] leading-relaxed text-amber-200 whitespace-pre-wrap">
+          {command}
+        </code>
+      ) : (
+        <code className="mb-1.5 block truncate rounded-md bg-black/40 px-2.5 py-1.5 text-[12px] text-amber-200">
+          {preview}
+        </code>
+      )}
+
+      {isLong && (
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="mb-2 text-[11px] text-amber-400/80 transition hover:text-amber-300"
+        >
+          {expanded ? "Show less ⌃" : "Show full ⌄"}
+        </button>
+      )}
+
+      <div className="flex gap-2">
+        <button
+          onClick={onApprove}
+          autoFocus
+          className="rounded-md bg-emerald-600/90 px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-emerald-600"
+        >
+          Approve
+        </button>
+        <button
+          onClick={onDeny}
+          className="rounded-md border border-[#3a3b42] px-3 py-1.5 text-[12px] text-[#d0d0d6] transition hover:bg-[#26272c]"
+        >
+          Deny
+        </button>
+      </div>
     </div>
   );
 }
@@ -446,7 +622,13 @@ function ActivityLine({ label, context }: { label: string; context?: string }) {
   );
 }
 
-function InlineClarifyInput({ onSubmit }: { onSubmit: (v: string) => void }) {
+function InlineClarifyInput({
+  onSubmit,
+  onCancel,
+}: {
+  onSubmit: (v: string) => void;
+  onCancel?: () => void;
+}) {
   const [v, setV] = useState("");
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -460,6 +642,11 @@ function InlineClarifyInput({ onSubmit }: { onSubmit: (v: string) => void }) {
         onChange={(e) => setV(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter" && v.trim()) onSubmit(v.trim());
+          else if (e.key === "Escape" && onCancel) {
+            e.preventDefault();
+            e.stopPropagation();
+            onCancel();
+          }
         }}
         placeholder="Type your answer…"
         className="flex-1 rounded-md border border-[#c99b4e]/40 bg-[#111214] px-3 py-1.5 text-[13px] outline-none focus:border-[#c99b4e]"

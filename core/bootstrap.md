@@ -380,3 +380,45 @@ On a normal machine this is a no-op (the lead already added the line); it
 exists so a from-scratch profile is self-sufficient. Both step 8–9 (workspace
 writes) and step 10 (profile config) are non-fatal — a failure is reported as a
 `skipped` step, not a hard error, since the app still functions without them.
+
+### Step 11 — Role agent profiles (superseded design note, 2026-07)
+
+Everything above installs the five role SKILL.md files onto the single
+`cofounder` profile, on the assumption that a "role agent" is a persona the
+orchestrator's own context can adopt. **This does not support real
+delegation**: the Hermes kanban dispatcher only auto-spawns a ready task
+whose `assignee` resolves to an actual Hermes profile on disk
+(`hermes_cli/kanban_db.py` — dispatch skips any assignee that isn't a real,
+spawnable profile), so with one shared profile every task's assignee could
+only ever be `cofounder` — the orchestrator could never hand work to a truly
+separate worker, only do it inline while labeling it as a role.
+
+The fix (implemented in `bootstrap.ts`'s `ensureRoleProfiles` /
+`renderRoleSoul`): each role gets its **own** Hermes profile, named
+`cofounder-<role>` (e.g. `cofounder-marketing`). Its SOUL is the role's
+SKILL.md charter (frontmatter stripped) plus a kanban-worker protocol section
+and the same Configured Environment block the orchestrator's SOUL carries —
+no skill installation or persona-seed history needed, since the profile's own
+SOUL fully defines it. Each role profile also needs the same
+`toolsets: [hermes-cli, kanban]` config as step 10, applied per-profile.
+
+Sequence, run once per role after step 7:
+```
+GET  /api/profiles                                          → check "cofounder-<role>" exists
+POST /api/profiles              {name:"cofounder-<role>"}    → skip if found
+PUT  /api/profiles/cofounder-<role>/soul  {content: <renderRoleSoul(role)>}
+GET/POST /api/fs/*  ~/.hermes/profiles/cofounder-<role>/config.yaml   → same toolsets patch as step 10
+PUT  /api/profiles/cofounder-<role>/description {description: <role blurb>}
+```
+
+This also changes what a role's *chat tab* is: instead of a persona-seeded
+session on the `cofounder` profile, it's a real session on `cofounder-<role>`
+(`session.create({profile: "cofounder-<role>", ...})`), so a role's delegated
+kanban work and its interactive chat share the same session history —
+delegated work is genuinely visible in "its own chat," not mirrored.
+
+The kanban dispatcher itself is not run by `hermes serve` — nothing spawns
+`hermes kanban dispatch` automatically. The app ticks it on an interval while
+running (`app/src/lib/cofounder/dispatch.ts`) rather than adding a persistent
+`hermes kanban daemon` process (a Rust sidecar change); this means delegated
+work runs whenever Cofounder is open, not while it's fully closed.

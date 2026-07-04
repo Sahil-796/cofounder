@@ -59,6 +59,32 @@ export function roleLabel(assignee?: string | null): string {
 }
 
 /**
+ * True if a kanban `created_by` (or `assignee`) string resolves to a known
+ * role id (as opposed to generic authors like "user"/"worker"/null).
+ */
+function isRoleId(value?: string | null): boolean {
+  if (!value) return false;
+  const key = value.toLowerCase();
+  return ROLES.some((r) => key === r.id || key.endsWith(`/${r.id}`) || key.includes(r.id));
+}
+
+/**
+ * Human label for who *delegated* a task, from the kanban `created_by` field.
+ * `created_by` is usually a generic author ("user", "worker") rather than a
+ * role id, so anything that isn't a recognized role falls back to "Cofounder"
+ * (the orchestrator) by convention — the founder always delegates through
+ * Cofounder in the product's mental model.
+ */
+export function delegatorLabel(createdBy?: string | null): string {
+  return isRoleId(createdBy) ? roleLabel(createdBy) : "Cofounder";
+}
+
+/** Matching emoji for `delegatorLabel` — the role emoji, or the sunflower. */
+export function delegatorEmoji(createdBy?: string | null): string {
+  return isRoleId(createdBy) ? roleEmoji(createdBy) : "🌻";
+}
+
+/**
  * The set of agents that own their own chat session: the cofounder orchestrator
  * plus every skill role. `id` is the chat/agent key used throughout the chat
  * store and the switcher. The orchestrator uses the sunflower; roles carry

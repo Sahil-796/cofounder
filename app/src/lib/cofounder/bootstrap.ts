@@ -22,14 +22,39 @@ import {
   WORKSPACE_SEED_FILES,
 } from "./assets";
 import { STAGE_OPTIONS, type CompanyProfile } from "./config";
+import { ROLES } from "./roles";
 
 export const COFOUNDER_PROFILE = "cofounder";
 const SKILL_CATEGORY = "cofounder";
 const PROFILE_DESCRIPTION = "Cofounder orchestrator — your AI company";
 
-/** Path to the cofounder profile's config.yaml (~ is expanded by the backend). */
-const PROFILE_CONFIG_PATH = "~/.hermes/profiles/cofounder/config.yaml";
-/** Toolsets the orchestrator needs so kanban_* tools are available. */
+/**
+ * Role agents are REAL, separate Hermes profiles — not personas sharing the
+ * orchestrator's profile. This matters structurally: the Hermes kanban
+ * dispatcher only auto-spawns a ready task whose `assignee` resolves to an
+ * actual profile on disk (`hermes_cli/kanban_db.py` — dispatch skips/parks
+ * any assignee that isn't a real, spawnable profile). With a single shared
+ * "cofounder" profile, every task's assignee was necessarily "cofounder"
+ * itself — the orchestrator could never truly delegate, only do the work
+ * inline while labeling it as a role. Giving each role its own profile
+ * (`cofounder-<role>`) makes `kanban_create({assignee: "cofounder-marketing"})`
+ * a genuine, independently-dispatchable worker, and makes each role's chat
+ * tab a real session on that profile — delegated work shows up there because
+ * it *is* that profile's own session history, not a client-side simulation.
+ */
+export const ROLE_PROFILE_PREFIX = "cofounder-";
+
+/** The real Hermes profile name for a role id, e.g. "marketing" → "cofounder-marketing". */
+export function roleProfileName(role: string): string {
+  return `${ROLE_PROFILE_PREFIX}${role}`;
+}
+
+/** Path to a profile's config.yaml (~ is expanded by the backend). */
+function profileConfigPath(profile: string): string {
+  return `~/.hermes/profiles/${profile}/config.yaml`;
+}
+
+/** Toolsets every profile needs so kanban_* tools are available. */
 const REQUIRED_TOOLSETS = ["hermes-cli", "kanban"];
 
 export type BootstrapStepStatus = "pending" | "running" | "done" | "skipped" | "error";
@@ -58,15 +83,32 @@ function isNotFound(err: unknown): boolean {
   return err instanceof HermesRestError && (err.status === 404 || err.status === 400);
 }
 
-/** True if `cofounder` already exists in GET /api/profiles (case-insensitive). */
-export async function cofounderProfileExists(): Promise<boolean> {
+/** True if `name` already exists in GET /api/profiles (case-insensitive). */
+export async function profileExists(name: string): Promise<boolean> {
   try {
     const res = await hermesRest.profiles<{ profiles?: { name?: string }[] }>();
-    return (res.profiles ?? []).some(
-      (p) => (p.name ?? "").toLowerCase() === COFOUNDER_PROFILE,
-    );
+    return (res.profiles ?? []).some((p) => (p.name ?? "").toLowerCase() === name.toLowerCase());
   } catch {
     return false;
+  }
+}
+
+/** True if `cofounder` already exists in GET /api/profiles (case-insensitive). */
+export async function cofounderProfileExists(): Promise<boolean> {
+  return profileExists(COFOUNDER_PROFILE);
+}
+
+/** Create a profile, tolerating "already exists" as success. Returns true if newly created. */
+async function ensureProfileExists(name: string): Promise<boolean> {
+  if (await profileExists(name)) return false;
+  try {
+    await hermesRest.createProfile(name);
+    return true;
+  } catch (err) {
+    if (err instanceof HermesRestError && err.status === 400 && /already exists/i.test(err.body ?? "")) {
+      return false;
+    }
+    throw err;
   }
 }
 
@@ -83,6 +125,7 @@ export async function runBootstrap(opts: BootstrapOptions): Promise<void> {
     { id: "workspace", label: "Setting up your company workspace", status: "pending" },
     { id: "seed", label: "Seeding workspace files", status: "pending" },
     { id: "company", label: "Writing your company profile", status: "pending" },
+    { id: "roleProfiles", label: `Setting up ${roles.length} independent agent profiles`, status: "pending" },
     { id: "toolsets", label: "Enabling the task board", status: "pending" },
     { id: "description", label: "Finishing up", status: "pending" },
   ];
@@ -110,25 +153,12 @@ export async function runBootstrap(opts: BootstrapOptions): Promise<void> {
 
   // Step 1 — profile
   set("profile", "running");
-  if (await cofounderProfileExists()) {
-    set("profile", "skipped", "Profile already existed");
-  } else {
-    try {
-      await hermesRest.createProfile(COFOUNDER_PROFILE);
-      set("profile", "done");
-    } catch (err) {
-      // "already exists" → treat as done, not a failure.
-      if (
-        err instanceof HermesRestError &&
-        err.status === 400 &&
-        /already exists/i.test(err.body ?? "")
-      ) {
-        set("profile", "skipped", "Profile already existed");
-      } else {
-        set("profile", "error", String(err));
-        throw err;
-      }
-    }
+  try {
+    const created = await ensureProfileExists(COFOUNDER_PROFILE);
+    set("profile", created ? "done" : "skipped", created ? undefined : "Profile already existed");
+  } catch (err) {
+    set("profile", "error", String(err));
+    throw err;
   }
 
   // Step 2 — SOUL.md (full overwrite, always safe). Rendered with the
@@ -222,18 +252,29 @@ export async function runBootstrap(opts: BootstrapOptions): Promise<void> {
     set("company", "skipped", `skipped (${String(err).slice(0, 60)})`);
   }
 
-  // Step 7 — ensure profile config has the toolsets kanban needs (idempotent,
+  // Step 7 — each role's OWN Hermes profile, so kanban can genuinely
+  // dispatch to it (see the ROLE_PROFILE_PREFIX comment above `runBootstrap`).
+  set("roleProfiles", "running");
+  try {
+    const detail = await ensureRoleProfiles(roles, workspaceRoot, opts.companyName);
+    set("roleProfiles", "done", detail);
+  } catch (err) {
+    set("roleProfiles", "error", String(err));
+    throw err;
+  }
+
+  // Step 8 — ensure profile config has the toolsets kanban needs (idempotent,
   // surgical edit of config.yaml preserving the rest of the file).
   set("toolsets", "running");
   try {
-    const changed = await ensureToolsets();
+    const changed = await ensureToolsetsForProfile(profileConfigPath(COFOUNDER_PROFILE));
     set("toolsets", changed ? "done" : "skipped", changed ? undefined : "already enabled");
   } catch (err) {
     // Non-fatal — the lead may have set this already; the app still works.
     set("toolsets", "skipped", `skipped (${String(err).slice(0, 60)})`);
   }
 
-  // Step 8 — description (always safe)
+  // Step 9 — description (always safe)
   set("description", "running");
   try {
     await hermesRest.putDescription(COFOUNDER_PROFILE, PROFILE_DESCRIPTION);
@@ -305,8 +346,10 @@ async function appendDecision(workspaceRoot: string, entry: string): Promise<voi
   const path = joinPath(workspaceRoot, ".cofounder/decisions.md");
   let existing = "";
   try {
-    const res = await hermesRest.fsReadText<{ content?: string }>(path);
-    existing = res.content ?? "";
+    // GET /api/fs/read-text returns the body under `text` (web_server.py:1893),
+    // not `content` — reading `content` would always yield "" and duplicate.
+    const res = await hermesRest.fsReadText<{ text?: string }>(path);
+    existing = res.text ?? "";
   } catch {
     /* missing — we'll create it below */
   }
@@ -319,22 +362,33 @@ async function appendDecision(workspaceRoot: string, entry: string): Promise<voi
 }
 
 /**
- * Ensure the cofounder profile's config.yaml lists the toolsets kanban needs
- * (`hermes-cli`, `kanban`). Surgical: reads the YAML text, checks for a
- * `toolsets:` line, and only rewrites when the line is missing or lacks an
- * entry — preserving every other line. Returns true if the file was changed.
+ * Ensure a profile's config.yaml lists the toolsets kanban needs (`hermes-cli`,
+ * `kanban`). Surgical: reads the YAML text, checks for a `toolsets:` line, and
+ * only rewrites when the line is missing or lacks an entry — preserving every
+ * other line. Returns true if the file was changed. Used for the cofounder
+ * profile and every role profile — a role can't claim/complete kanban tasks
+ * (or get spawned by the dispatcher into a session that can) without it.
  *
- * The lead already added this during setup, so on a normal run this is a
- * skip. It's here so a from-scratch bootstrap (fresh profile) is self-sufficient.
+ * IMPORTANT: a freshly created profile has NO config.yaml at all (confirmed
+ * against hermes_cli/config.py — `load_config()` falls back to
+ * `DEFAULT_CONFIG["toolsets"] = ["hermes-cli"]`, which does NOT include
+ * `kanban`). A missing file is therefore not "already fine, leave it" — it's
+ * the common case for every new role profile, and must be created, not
+ * skipped, or that profile's agent has no kanban_* tools at all.
  */
-async function ensureToolsets(): Promise<boolean> {
+async function ensureToolsetsForProfile(configPath: string): Promise<boolean> {
   let content: string;
   try {
-    const res = await hermesRest.fsReadText<{ content?: string }>(PROFILE_CONFIG_PATH);
-    content = res.content ?? "";
+    // read-text returns the body under `text` (web_server.py:1893), not
+    // `content`; reading `content` here would always see an empty config.
+    const res = await hermesRest.fsReadText<{ text?: string }>(configPath);
+    content = res.text ?? "";
   } catch {
-    // No config.yaml yet (or unreadable) — leave it to Hermes's own defaults.
-    return false;
+    // No config.yaml on disk yet — create one from scratch. The profile
+    // directory already exists (fs/write-text only requires the immediate
+    // parent to exist), so this write is safe.
+    await hermesRest.fsWriteText(configPath, `toolsets: [${REQUIRED_TOOLSETS.join(", ")}]\n`);
+    return true;
   }
 
   const lines = content.split("\n");
@@ -345,7 +399,7 @@ async function ensureToolsets(): Promise<boolean> {
     // block if present, else at the very top, so it stays a top-level key.
     const insertAt = topLevelInsertIndex(lines);
     lines.splice(insertAt, 0, `toolsets: [${REQUIRED_TOOLSETS.join(", ")}]`);
-    await hermesRest.fsWriteText(PROFILE_CONFIG_PATH, lines.join("\n"));
+    await hermesRest.fsWriteText(configPath, lines.join("\n"));
     return true;
   }
 
@@ -363,7 +417,7 @@ async function ensureToolsets(): Promise<boolean> {
   if (missing.length === 0) return false; // already complete
   const merged = [...present, ...missing];
   lines[idx] = `${m[1]}[${merged.join(", ")}]`;
-  await hermesRest.fsWriteText(PROFILE_CONFIG_PATH, lines.join("\n"));
+  await hermesRest.fsWriteText(configPath, lines.join("\n"));
   return true;
 }
 
@@ -409,6 +463,162 @@ export async function ensureSoulCurrent(workspaceRoot: string): Promise<void> {
     /* unreadable — fall through and write */
   }
   await hermesRest.putSoul(COFOUNDER_PROFILE, desired);
+}
+
+/** Strip a Hermes skill file's YAML frontmatter (--- ... ---), keeping the body. */
+function stripFrontmatter(content: string): string {
+  const m = content.match(/^---\n[\s\S]*?\n---\n?/);
+  return m ? content.slice(m[0].length).replace(/^\s+/, "") : content;
+}
+
+/**
+ * Render a role's SOUL — the system prompt for its own dedicated profile. Its
+ * charter is the existing SKILL.md body (frontmatter stripped); we prepend an
+ * identity preamble and append the kanban worker protocol + configured
+ * environment, so a role profile is fully self-sufficient as an autonomous
+ * dispatch target — it doesn't need the orchestrator's SOUL or a persona seed.
+ */
+export function renderRoleSoul(role: string, workspaceRoot: string, companyName?: string): string {
+  const charter = stripFrontmatter(ROLE_SKILLS[role] ?? "");
+  const company = (companyName || "").trim();
+  const preamble = [
+    `# Cofounder — ${role[0].toUpperCase()}${role.slice(1)} Agent`,
+    "",
+    `You are the **${role}** agent on${company ? ` ${company}'s` : " the founder's"} Cofounder AI` +
+      " team, one of several specialist agents working under a human founder's direction " +
+      "(and sometimes dispatched by the Cofounder orchestrator). Stay in your lane — the " +
+      "charter below — and if a request clearly belongs to another role, say so plainly " +
+      "instead of doing out-of-scope work.",
+    "",
+  ].join("\n");
+  const protocol = [
+    "",
+    "## Working board tasks assigned to you",
+    "",
+    `You are often started specifically to work one or more Hermes Kanban tasks ` +
+      `assigned to you (assignee: \`${roleProfileName(role)}\`). When that's why you're running:`,
+    "",
+    "1. Check what's ready/claimed for you (`kanban_list`, or the task id you were given).",
+    "2. `kanban_claim` it before starting; post progress with `kanban_comment`.",
+    "3. Do the work per the workspace conventions above.",
+    "4. `kanban_complete` with a short, honest result summary, or `kanban_block` with a" +
+      " clear reason if you can't finish — never invent a fake result.",
+    "",
+    "Never claim or work a task assigned to a different profile.",
+    "",
+  ].join("\n");
+  const env = [
+    "",
+    "## Configured environment",
+    "",
+    `- **Workspace root:** \`${workspaceRoot}\``,
+    company ? `- **Company:** ${company}` : "",
+    "- All workspace reads and writes use this path. Do not use any other",
+    "  location for company files.",
+    "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return `${preamble}${charter.replace(/\s*$/, "\n")}${protocol}${env}`;
+}
+
+/**
+ * Bootstrap step: ensure every role has its own real profile (create if
+ * missing), with a current SOUL, a working model default, the
+ * kanban/hermes-cli toolsets, and a short routing description. Idempotent —
+ * safe to re-run every launch.
+ *
+ * MODEL DEFAULT: a brand-new profile's config.yaml has no `model:` key at
+ * all, so Hermes falls back to an empty-model default that 400s immediately
+ * ("No models provided") — verified by watching the kanban dispatcher spawn
+ * a `cofounder-marketing` worker that crashed on its very first API call.
+ * We fix this by cloning the cofounder profile's own (known-working)
+ * config.yaml as the starting point for a freshly created role profile — same
+ * model, same toolsets — rather than leaving it to Hermes's broken default.
+ * A role profile that already has its own config.yaml (e.g. the founder set
+ * a different model for it via the per-agent ModelPicker) is left untouched.
+ */
+async function ensureRoleProfiles(
+  roles: string[],
+  workspaceRoot: string,
+  companyName?: string,
+): Promise<string> {
+  let created = 0;
+  for (const role of roles) {
+    const profile = roleProfileName(role);
+    const wasCreated = await ensureProfileExists(profile);
+    if (wasCreated) created++;
+    await hermesRest.putSoul(profile, renderRoleSoul(role, workspaceRoot, companyName));
+    await ensureWorkingModel(profile);
+    await ensureToolsetsForProfile(profileConfigPath(profile));
+    const blurb = ROLES.find((r) => r.id === role)?.blurb;
+    if (blurb) {
+      try {
+        await hermesRest.putDescription(profile, blurb);
+      } catch {
+        /* non-fatal — cosmetic */
+      }
+    }
+  }
+  return `${created} created, ${roles.length - created} already existed`;
+}
+
+/** Extract a top-level `key:` block (the line plus its indented children) from YAML text. */
+function extractTopLevelBlock(lines: string[], key: string): string[] | null {
+  const idx = lines.findIndex((l) => new RegExp(`^${key}\\s*:`).test(l));
+  if (idx === -1) return null;
+  const block = [lines[idx]];
+  let i = idx + 1;
+  while (i < lines.length && /^\s+\S/.test(lines[i])) {
+    block.push(lines[i]);
+    i++;
+  }
+  return block;
+}
+
+/**
+ * Ensure `profile`'s config.yaml has a `model:` block, so a spawned worker
+ * doesn't fall back to Hermes's broken empty-model default. If the file (or
+ * the key) is missing, clone the cofounder profile's own `model:` block —
+ * inserted alongside existing content (e.g. `toolsets:`), never clobbering
+ * it. No-op if the profile already has its own `model:` key (never overwrite
+ * a founder-customized one, e.g. via the per-agent ModelPicker).
+ */
+async function ensureWorkingModel(profile: string): Promise<void> {
+  let lines: string[] = [];
+  try {
+    const res = await hermesRest.fsReadText<{ text?: string }>(profileConfigPath(profile));
+    lines = (res.text ?? "").split("\n");
+  } catch {
+    /* no config.yaml yet — lines stays [] */
+  }
+  if (extractTopLevelBlock(lines, "model")) return; // already has its own — leave it alone
+
+  let cofounderModel: string[] | null = null;
+  try {
+    const res = await hermesRest.fsReadText<{ text?: string }>(profileConfigPath(COFOUNDER_PROFILE));
+    cofounderModel = extractTopLevelBlock((res.text ?? "").split("\n"), "model");
+  } catch {
+    /* cofounder's own config.yaml is missing too — nothing to clone */
+  }
+  if (!cofounderModel) return;
+
+  const content = lines.filter((l) => l.trim()).join("\n");
+  const next = content ? `${cofounderModel.join("\n")}\n${content}\n` : `${cofounderModel.join("\n")}\n`;
+  await hermesRest.fsWriteText(profileConfigPath(profile), next);
+}
+
+/**
+ * Self-heal for installs bootstrapped before role agents had their own
+ * profiles: creates any missing role profile and refreshes its SOUL/toolsets
+ * so an existing single-profile install picks up real delegation without the
+ * founder re-running onboarding. Cheap and safe to call on every app start.
+ */
+export async function ensureRoleProfilesCurrent(
+  workspaceRoot: string,
+  companyName?: string,
+): Promise<void> {
+  await ensureRoleProfiles(Object.keys(ROLE_SKILLS), workspaceRoot, companyName);
 }
 
 /** Join a root and a relative path with a single slash (no Node path in browser). */

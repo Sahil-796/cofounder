@@ -18,7 +18,9 @@ function shortModel(id: string): string {
 }
 
 export default function ModelPicker() {
-  const model = useChat((s) => s.model);
+  // Model is per-agent now (each role is its own profile) — read the active
+  // chat's own slot, not a global value.
+  const model = useChat((s) => s.chats[s.activeAgent]?.model ?? null);
   // Scope "current model" resolution to the active chat's live session.
   const sessionId = useChat((s) => s.chats[s.activeAgent]?.sessionId ?? null);
   const setModel = useChat((s) => s.setModel);

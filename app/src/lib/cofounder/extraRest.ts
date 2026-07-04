@@ -43,6 +43,14 @@ export interface KanbanTask {
   session_id?: string | null;
   /** Priority tiebreaker (higher = sooner). */
   priority?: number | null;
+  /**
+   * Author recorded on the task (`hermes kanban create --created-by`, default
+   * "user"). Values seen in the wild: "user", "worker", or a role id when a
+   * role delegates onward. Not a role id in the common case — UI callers
+   * should treat anything that isn't a recognized role as the Cofounder
+   * orchestrator delegating the work (see roles.ts `roleLabel`).
+   */
+  created_by?: string | null;
 }
 
 /** A run row from `hermes kanban runs <id> --json`. */
@@ -115,7 +123,7 @@ const MAX_ROWS = 40;
 const JQ_PROJECT =
   "sort_by(.created_at) | reverse | .[0:" +
   MAX_ROWS +
-  "] | [.[] | {id,title,assignee,status,created_at,started_at,completed_at,session_id,priority}]";
+  "] | [.[] | {id,title,assignee,status,created_at,started_at,completed_at,session_id,priority,created_by}]";
 
 function parseTasks(stdout: string): KanbanTask[] {
   const trimmed = stdout.trim();
@@ -139,6 +147,7 @@ function parseTasks(stdout: string): KanbanTask[] {
       completed_at: numOrNull(t.completed_at),
       session_id: (t.session_id as string | null) ?? null,
       priority: numOrNull(t.priority),
+      created_by: (t.created_by as string | null) ?? null,
     }))
     .filter((t) => t.id);
 }
