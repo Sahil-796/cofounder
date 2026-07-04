@@ -15,19 +15,21 @@ export interface Role {
   skill: boolean;
   /** Short description for the Company roles grid. */
   blurb: string;
+  /** Fuller sentence for the department overview header. */
+  deptBlurb: string;
   /** Accent color (hex) for canvas badges, switcher dots, and role chips. */
   color: string;
 }
 
 export const ROLES: Role[] = [
-  { id: "sales", label: "Sales", emoji: "🤝", skill: false, blurb: "Pipeline, prospecting, deal tracking.", color: "#e0b15a" },
-  { id: "operations", label: "Operations", emoji: "⚙️", skill: true, blurb: "Process, scheduling, reporting, calendar.", color: "#7ea6e0" },
-  { id: "marketing", label: "Marketing", emoji: "📣", skill: true, blurb: "Campaigns, content, SEO, brand, social.", color: "#e07ea6" },
-  { id: "finance", label: "Finance", emoji: "💰", skill: true, blurb: "Budgeting, invoicing, expense tracking.", color: "#6fce9f" },
-  { id: "design", label: "Design", emoji: "🎨", skill: false, blurb: "Brand visuals, assets, product design.", color: "#b98ce0" },
-  { id: "legal", label: "Legal", emoji: "⚖️", skill: false, blurb: "Contracts, compliance, policy review.", color: "#c9c9cf" },
-  { id: "support", label: "Support", emoji: "💬", skill: true, blurb: "Tickets, FAQs, triage, escalation.", color: "#e09a6f" },
-  { id: "research", label: "Research", emoji: "🔬", skill: true, blurb: "Competitor & market intel, company research.", color: "#9fd06f" },
+  { id: "sales", label: "Sales", emoji: "🤝", skill: false, blurb: "Pipeline, prospecting, deal tracking.", deptBlurb: "Sales agents work the pipeline, follow up with prospects, and keep deals moving.", color: "#e0b15a" },
+  { id: "operations", label: "Operations", emoji: "⚙️", skill: true, blurb: "Process, scheduling, reporting, calendar.", deptBlurb: "Operations agents streamline your processes, coordinate teams, and keep everything running smoothly.", color: "#7ea6e0" },
+  { id: "marketing", label: "Marketing", emoji: "📣", skill: true, blurb: "Campaigns, content, SEO, brand, social.", deptBlurb: "Marketing agents plan campaigns, write content, and grow your reach across every channel.", color: "#e07ea6" },
+  { id: "finance", label: "Finance", emoji: "💰", skill: true, blurb: "Budgeting, invoicing, expense tracking.", deptBlurb: "Finance agents track spend, manage invoices, and keep your numbers straight.", color: "#6fce9f" },
+  { id: "design", label: "Design", emoji: "🎨", skill: false, blurb: "Brand visuals, assets, product design.", deptBlurb: "Design agents shape your brand's look and feel, from product UI to marketing assets.", color: "#b98ce0" },
+  { id: "legal", label: "Legal", emoji: "⚖️", skill: false, blurb: "Contracts, compliance, policy review.", deptBlurb: "Legal agents review contracts, track compliance, and flag risk before it becomes a problem.", color: "#c9c9cf" },
+  { id: "support", label: "Support", emoji: "💬", skill: true, blurb: "Tickets, FAQs, triage, escalation.", deptBlurb: "Support agents triage tickets, answer questions, and escalate what needs a human.", color: "#e09a6f" },
+  { id: "research", label: "Research", emoji: "🔬", skill: true, blurb: "Competitor & market intel, company research.", deptBlurb: "Research agents track competitors, scan the market, and dig up the intel you need to decide.", color: "#9fd06f" },
 ];
 
 /** Roles that map to an installable/installed Cofounder skill. */

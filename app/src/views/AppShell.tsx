@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import CanvasView, { type Artifact } from "./CanvasView";
-import RightPanel, { type PanelTab } from "./RightPanel";
+import RightPanel, { type PanelTab, type DeptNav } from "./RightPanel";
 import Onboarding from "./Onboarding";
 import { initConnection } from "@/state/connection";
 import { loadConfig, type CofounderConfig } from "@/lib/cofounder/config";
@@ -41,6 +41,9 @@ export default function AppShell() {
   const [config, setConfig] = useState<CofounderConfig | null>(null);
   const [tab, setTabState] = useState<PanelTab>(tabFromHash);
   const [artifacts, setArtifacts] = useState<Artifact[] | undefined>(undefined);
+  // Department drill-down (canvas pill / roles grid → DepartmentView →
+  // AgentWorkspaceView), shared between the canvas and the right panel.
+  const [dept, setDept] = useState<DeptNav | null>(null);
   const send = useChat((s) => s.send);
   const setActiveAgent = useChat((s) => s.setActiveAgent);
 
@@ -142,8 +145,9 @@ export default function AppShell() {
     [send, setTab],
   );
 
-  // Open a specific agent's chat from anywhere (canvas pill, roles grid):
-  // switch to the Cofounder tab and activate that agent's chat slot.
+  // Open a specific agent's real chat: switch to the Cofounder tab and
+  // activate that agent's chat slot. Used by the center canvas node directly,
+  // and by the department drill-down's "chat" actions.
   const openAgentChat = useCallback(
     (agentId: string) => {
       setActiveAgent(agentId);
@@ -151,6 +155,11 @@ export default function AppShell() {
     },
     [setActiveAgent, setTab],
   );
+
+  // Open a department's overview from the canvas ring or the Company roles grid.
+  const openDepartment = useCallback((agentId: string) => {
+    setDept({ id: agentId, view: "department" });
+  }, []);
 
   const founderInitials = useMemo(
     () => initials(config?.founderName ?? "Sahil"),
@@ -189,6 +198,7 @@ export default function AppShell() {
           artifacts={artifacts}
           onAdd={() => setTab("cofounder")}
           onOpenAgentChat={openAgentChat}
+          onOpenDepartment={openDepartment}
         />
       </div>
       <div className="min-w-0 flex-1">
@@ -199,6 +209,8 @@ export default function AppShell() {
           workspaceRoot={cfg.workspaceRoot}
           onSendToChat={onSendToChat}
           onOpenAgentChat={openAgentChat}
+          dept={dept}
+          setDept={setDept}
         />
       </div>
     </div>

@@ -23,12 +23,15 @@ type CreateMode = "run" | "consult" | "plain";
 export default function NewTaskModal({
   onClose,
   onCreated,
+  initialAssignee,
 }: {
   onClose: () => void;
   onCreated: () => void;
+  /** Preset the assignee dropdown — e.g. opened from an agent's own workspace. */
+  initialAssignee?: string;
 }) {
   const [title, setTitle] = useState("");
-  const [assignee, setAssignee] = useState("");
+  const [assignee, setAssignee] = useState(initialAssignee ?? "");
   const [body, setBody] = useState("");
   const [priority, setPriority] = useState("");
   const [submitting, setSubmitting] = useState<CreateMode | null>(null);

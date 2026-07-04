@@ -10,7 +10,9 @@
  *    `hermes kanban list --json`, every ~15s, paused when the tab is hidden).
  *  - A pill pulses while that agent's chat session is streaming; the center
  *    Cofounder node pulses while the orchestrator streams.
- *  - Clicking any role pill (or the center node) opens that agent's chat.
+ *  - Clicking a role pill opens that department's overview (breadcrumb
+ *    drill-down in the right panel); clicking the center node opens the
+ *    Cofounder chat directly.
  *
  * Artifact mini-cards render ONLY real workspace files (scanned via fs/list,
  * passed in via `artifacts`) — never placeholder filenames. Roles with no
@@ -134,13 +136,16 @@ export default function CanvasView({
   artifacts,
   onAdd,
   onOpenAgentChat,
+  onOpenDepartment,
 }: {
   founderInitials: string;
   companyName: string;
   artifacts?: Artifact[];
   onAdd?: () => void;
-  /** Open a role/orchestrator chat when its node is clicked. */
+  /** Open the orchestrator's own chat when the center node is clicked. */
   onOpenAgentChat?: (agentId: string) => void;
+  /** Open a department's overview when its ring pill is clicked. */
+  onOpenDepartment?: (agentId: string) => void;
 }) {
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -368,14 +373,14 @@ export default function CanvasView({
             const dim = query.length > 0 && !roleMatch(r.id, r.label);
             const count = kanbanCounts[r.id] ?? 0;
             const streaming = r.skill && chats[r.id]?.streaming;
-            const clickable = r.skill && !!onOpenAgentChat;
+            const clickable = r.skill && !!onOpenDepartment;
             return (
               <Node key={r.id} x={p.x} y={p.y}>
                 <button
                   onClick={() =>
-                    clickable && clickIfNotDragged(() => onOpenAgentChat!(r.id))
+                    clickable && clickIfNotDragged(() => onOpenDepartment!(r.id))
                   }
-                  title={clickable ? `Open ${r.label} chat` : `${r.label} (coming soon)`}
+                  title={clickable ? `Open ${r.label}` : `${r.label} (coming soon)`}
                   className={`relative flex items-center gap-2 rounded-full border px-3 py-2 shadow-[0_6px_18px_-8px_rgba(0,0,0,0.8)] transition ${
                     dim ? "opacity-25" : ""
                   } ${

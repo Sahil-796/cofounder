@@ -82,6 +82,18 @@ const CONTEXT_SEED_CAP = 40;
 /** Watchdog: if no stream event lands this long after prompt.submit, warn. */
 const WATCHDOG_MS = 20_000;
 
+/**
+ * Watchdog re-arms itself while `session.status` still reports the agent
+ * running, rechecking every WATCHDOG_MS. After this many rounds with zero
+ * stream activity, give up on the run instead of polling forever — a run
+ * that's truly alive would have emitted SOME event (thinking/tool/delta) by
+ * then. Caps a wedged run at ~2 minutes of silent "loading" instead of
+ * leaving the UI stuck indefinitely (see the "prompts just show loading"
+ * bug: reconcileStreaming used to fire once, see the agent still reported
+ * "running", and never check again).
+ */
+const WATCHDOG_MAX_ROUNDS = 6;
+
 /** session.list `source` tag that marks a session as owned by this app. */
 export const APP_SOURCE = "cofounder-app";
 
@@ -787,38 +799,81 @@ async function reconcileStreaming(set: ZSet, get: () => ChatState, agentId: stri
 const watchdogs = new Map<string, ReturnType<typeof setTimeout>>();
 /** Live session id being watched per agent, and whether a stream event landed. */
 const watchdogSids = new Map<string, string>();
+/** Consecutive silent rounds per agent, reset whenever stream activity lands. */
+const watchdogRounds = new Map<string, number>();
 
 function clearWatchdog(agentId: string): void {
   const t = watchdogs.get(agentId);
   if (t) clearTimeout(t);
   watchdogs.delete(agentId);
   watchdogSids.delete(agentId);
+  watchdogRounds.delete(agentId);
 }
 
 /**
  * Arm the per-agent watchdog after a successful prompt.submit: if no stream
  * event (message.start/delta, thinking, tool.*) arrives for this session within
- * WATCHDOG_MS, surface a notice + log it. We do NOT clear streaming purely on
- * the timer — only if session.status confirms the agent is actually idle.
+ * WATCHDOG_MS, check session.status. If the agent reports idle, clear the stuck
+ * spinner (reconcileStreaming). If it still reports running, re-arm for another
+ * round rather than going silent forever — after WATCHDOG_MAX_ROUNDS with no
+ * activity at all, give up and force-stop the run with a visible error so the
+ * UI never just sits on "loading" indefinitely.
  */
 function armWatchdog(set: ZSet, get: () => ChatState, agentId: string, sid: string): void {
   clearWatchdog(agentId);
   watchdogSids.set(agentId, sid);
+  watchdogRounds.set(agentId, 0);
+  scheduleWatchdogRound(set, get, agentId, sid);
+}
+
+function scheduleWatchdogRound(set: ZSet, get: () => ChatState, agentId: string, sid: string): void {
   watchdogs.set(
     agentId,
     setTimeout(() => {
       watchdogs.delete(agentId);
       // Stream may have already ended cleanly.
-      if (!get().chats[agentId]?.streaming) {
+      if (!get().chats[agentId]?.streaming || get().chats[agentId]?.sessionId !== sid) {
+        watchdogRounds.delete(agentId);
         watchdogSids.delete(agentId);
         return;
       }
-      logEvent("warn", "watchdog", `no response from ${agentId} in ${WATCHDOG_MS / 1000}s`, { session_id: sid });
+      const round = (watchdogRounds.get(agentId) ?? 0) + 1;
+      watchdogRounds.set(agentId, round);
+      logEvent("warn", "watchdog", `no response from ${agentId} in ${(WATCHDOG_MS * round) / 1000}s (round ${round})`, { session_id: sid });
       set({
         notice: `${agentById(agentId).label}: no response from the model yet — check Logs / model config.`,
       });
-      void reconcileStreaming(set, get, agentId);
-      watchdogSids.delete(agentId);
+      void reconcileStreaming(set, get, agentId).then((cleared) => {
+        if (cleared) {
+          watchdogRounds.delete(agentId);
+          watchdogSids.delete(agentId);
+          return;
+        }
+        if (round >= WATCHDOG_MAX_ROUNDS) {
+          // Gave it multiple full rounds with zero stream activity and a
+          // "running" status that never resolves — treat as wedged, not just
+          // slow, and hand control back to the user instead of spinning forever.
+          logEvent("error", "watchdog", `giving up on ${agentId} after ${round} silent rounds`, { session_id: sid });
+          set({
+            notice: `${agentById(agentId).label}: gave up waiting for a response — the run may be stuck. Try again or check the model config.`,
+          });
+          patchChat(set, agentId, (c) => ({
+            streaming: false,
+            statusText: null,
+            messages: patchLastAssistant(c.messages, (m) =>
+              m.streaming
+                ? { ...m, streaming: false, error: true, activity: undefined, text: m.text || "(no response — the run appears stuck)" }
+                : m,
+            ),
+          }));
+          watchdogRounds.delete(agentId);
+          watchdogSids.delete(agentId);
+          return;
+        }
+        if (get().chats[agentId]?.streaming && get().chats[agentId]?.sessionId === sid) {
+          scheduleWatchdogRound(set, get, agentId, sid);
+        }
+      });
     }, WATCHDOG_MS),
   );
 }

@@ -66,6 +66,7 @@ export class HermesWs {
   private readonly pending = new Map<string, Pending>();
   private readonly handlers = new Map<string, Set<EventHandler>>();
   private readonly stateHandlers = new Set<(s: WsConnectionState) => void>();
+  private connectPromise: Promise<void> | null = null;
 
   private readonly requestTimeoutMs: number;
   private readonly connectTimeoutMs: number;
@@ -97,14 +98,20 @@ export class HermesWs {
   /** Open the socket. Resolves on `open`. Idempotent while open/connecting. */
   connect(): Promise<void> {
     this.wantOpen = true;
-    if (
-      this.socket &&
-      (this.socket.readyState === WebSocket.OPEN ||
-        this.socket.readyState === WebSocket.CONNECTING)
-    ) {
+    if (this.socket?.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
-    return this.open();
+    // A connect already in flight (including a scheduled reconnect's `open()`)
+    // must be awaited rather than resolved immediately — resolving early here
+    // used to let callers race ahead to `request()` while the socket was still
+    // CONNECTING, which fails fast with "gateway not connected" instead of
+    // actually waiting for the handshake.
+    if (this.connectPromise) return this.connectPromise;
+    const p = this.open().finally(() => {
+      if (this.connectPromise === p) this.connectPromise = null;
+    });
+    this.connectPromise = p;
+    return p;
   }
 
   private async open(): Promise<void> {

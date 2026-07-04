@@ -33,16 +33,19 @@ function isDir(e: FsEntry): boolean {
 export default function CompanyTab({
   workspaceRoot,
   onOpenAgentChat,
+  onOpenDepartment,
 }: {
   workspaceRoot: string;
-  /** Open a role agent's chat from the roles grid (optional). */
+  /** Open a role agent's chat directly (used as a fallback if onOpenDepartment isn't given). */
   onOpenAgentChat?: (agentId: string) => void;
+  /** Open the department drill-down for a role (preferred — see RightPanel). */
+  onOpenDepartment?: (agentId: string) => void;
 }) {
-  const [view, setView] = useState<"files" | "roles">("files");
+  const [view, setView] = useState<"files" | "departments">("files");
   return (
     <div className="flex h-full flex-col">
       <div className="flex gap-1 px-4 pt-3">
-        {(["files", "roles"] as const).map((v) => (
+        {(["files", "departments"] as const).map((v) => (
           <button
             key={v}
             onClick={() => setView(v)}
@@ -52,7 +55,7 @@ export default function CompanyTab({
                 : "text-[#8a8a92] hover:text-[#c7c7cd]"
             }`}
           >
-            {v === "files" ? "Workspace" : "Roles"}
+            {v === "files" ? "Workspace" : "Departments"}
           </button>
         ))}
       </div>
@@ -60,14 +63,14 @@ export default function CompanyTab({
         {view === "files" ? (
           <WorkspaceBrowser root={workspaceRoot} />
         ) : (
-          <RolesGrid onOpenAgentChat={onOpenAgentChat} />
+          <DepartmentsGrid onOpenDepartment={onOpenDepartment ?? onOpenAgentChat} />
         )}
       </div>
     </div>
   );
 }
 
-function WorkspaceBrowser({ root }: { root: string }) {
+export function WorkspaceBrowser({ root }: { root: string }) {
   const [cwd, setCwd] = useState(root);
   const [entries, setEntries] = useState<FsEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -216,39 +219,40 @@ function WorkspaceBrowser({ root }: { root: string }) {
   );
 }
 
-function RolesGrid({ onOpenAgentChat }: { onOpenAgentChat?: (agentId: string) => void }) {
+function DepartmentsGrid({ onOpenDepartment }: { onOpenDepartment?: (agentId: string) => void }) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       {ROLES.map((r) => {
         const connectors = CONNECTORS.roles[r.id] ?? [];
-        // Only skill roles have a live chat agent to open.
-        const chattable = r.skill && !!onOpenAgentChat;
+        // Every department has an overview page (DepartmentView handles the
+        // "no agent installed yet" case for roles without a skill).
+        const clickable = !!onOpenDepartment;
         return (
           <div
             key={r.id}
-            onClick={chattable ? () => onOpenAgentChat!(r.id) : undefined}
-            role={chattable ? "button" : undefined}
-            tabIndex={chattable ? 0 : undefined}
+            onClick={clickable ? () => onOpenDepartment!(r.id) : undefined}
+            role={clickable ? "button" : undefined}
+            tabIndex={clickable ? 0 : undefined}
             onKeyDown={
-              chattable
+              clickable
                 ? (e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      onOpenAgentChat!(r.id);
+                      onOpenDepartment!(r.id);
                     }
                   }
                 : undefined
             }
             className={`rounded-xl border border-[#222327] bg-[#141518] p-3.5 transition ${
-              chattable ? "cursor-pointer hover:border-[#33343a] hover:bg-[#181a1e]" : ""
+              clickable ? "cursor-pointer hover:border-[#33343a] hover:bg-[#181a1e]" : ""
             }`}
           >
             <div className="mb-2 flex items-center gap-2">
               <span className="text-lg">{r.emoji}</span>
               <span className="text-[14px] font-medium text-[#e2e2e6]">{r.label}</span>
-              {chattable && (
-                <span className="text-[11px] text-[#6a6a72]" title={`Open ${r.label} chat`}>
-                  💬
+              {clickable && (
+                <span className="text-[11px] text-[#6a6a72]" title={`Open ${r.label} department`}>
+                  ›
                 </span>
               )}
               <span

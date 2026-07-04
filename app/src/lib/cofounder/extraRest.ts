@@ -111,19 +111,33 @@ interface ShellExecResult {
 }
 
 /**
- * Cap on rows requested from the CLI. shell.exec caps stdout at 4000 chars;
- * the projected row is ~200 bytes, so 40 rows keeps us safely under the limit.
+ * shell.exec keeps only the LAST 4000 chars of stdout (verified against
+ * tui_gateway/server.py: `"stdout": r.stdout[-4000:]`) — it truncates the
+ * FRONT, not the end. Since our jq output is newest-first, that means an
+ * over-budget payload doesn't just lose old rows off the tail, it loses the
+ * opening `[` and every newest row, breaking JSON parsing entirely and
+ * silently rendering the WHOLE board empty — which is exactly the bug this
+ * comment is here to stop someone from reintroducing (found 2026-07-04: a
+ * real board with 32 tasks at the old MAX_ROWS=40/no title cap measured
+ * ~7.7KB projected, blew the budget, and `fetchKanbanBoard` returned []).
+ *
+ * Fix: keep a provable worst-case row size (title capped in jq) times a row
+ * count that stays comfortably under 4000 bytes even at that worst case, AND
+ * retry at a smaller row count if the output still doesn't start with `[` —
+ * so this degrades gracefully (fewer rows shown) instead of breaking outright
+ * if the schema grows again later.
  */
-const MAX_ROWS = 40;
+const MAX_TITLE_CHARS = 60;
+const ROW_COUNT_CANDIDATES = [16, 8, 3];
 
-/**
- * jq program: keep only UI fields, newest-first, capped. Falls through to raw
- * output on shells without jq (we detect the missing-jq case and retry raw).
- */
-const JQ_PROJECT =
-  "sort_by(.created_at) | reverse | .[0:" +
-  MAX_ROWS +
-  "] | [.[] | {id,title,assignee,status,created_at,started_at,completed_at,session_id,priority,created_by}]";
+/** jq program: keep only UI fields (title capped), newest-first, capped row count. */
+function jqProject(rows: number): string {
+  return (
+    `sort_by(.created_at) | reverse | .[0:${rows}] | ` +
+    `[.[] | {id,title:(.title[0:${MAX_TITLE_CHARS}]),assignee,status,created_at,` +
+    "started_at,completed_at,session_id,priority,created_by}]"
+  );
+}
 
 function parseTasks(stdout: string): KanbanTask[] {
   const trimmed = stdout.trim();
@@ -180,17 +194,22 @@ export async function fetchKanbanBoard(
 ): Promise<KanbanTask[]> {
   const listCmd =
     "hermes kanban list --json" + (includeArchived ? " --archived" : "");
-  // Preferred: project through jq so the payload stays under shell.exec's cap.
-  try {
-    const piped = `${listCmd} 2>/dev/null | jq -c '${JQ_PROJECT}'`;
-    const res = await shellExec(piped);
-    if (res.code === 0 && res.stdout.trim().startsWith("[")) {
-      return parseTasks(res.stdout);
+  // Try shrinking row counts until the jq-projected output actually parses —
+  // see the ROW_COUNT_CANDIDATES comment: an over-budget payload loses its
+  // opening `[` to shell.exec's tail-only truncation, not just extra rows.
+  for (const rows of ROW_COUNT_CANDIDATES) {
+    try {
+      const piped = `${listCmd} 2>/dev/null | jq -c '${jqProject(rows)}'`;
+      const res = await shellExec(piped);
+      if (res.code !== 0) break; // jq itself failed/missing — retrying smaller won't help
+      if (res.stdout.trim().startsWith("[")) return parseTasks(res.stdout);
+    } catch {
+      break;
     }
-  } catch {
-    /* fall through to raw */
   }
-  // Fallback: raw JSON (works for small boards, or where jq is absent).
+  // Last resort: raw JSON, only useful if jq is unavailable AND the board is
+  // small enough to fit unprojected — usually won't help once there's any
+  // real task history, but it's harmless to try.
   try {
     const res = await shellExec(`${listCmd} 2>/dev/null`);
     return parseTasks(res.stdout);
