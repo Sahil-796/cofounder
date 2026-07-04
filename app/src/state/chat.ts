@@ -1,11 +1,15 @@
 /**
  * Multi-agent chat store. Owns N named chats — the `cofounder` orchestrator
  * (default) plus one per role (marketing, research, support, operations,
- * finance). Each chat is its own live Hermes session on the `cofounder`
- * profile; role sessions adopt their persona by seeding an invisible
- * system-style history on session.create (the seed lives in backend history
- * only — it's never added to the rendered thread). Events are routed to the
- * owning chat by session_id.
+ * finance). Each chat is its own live Hermes session, but NOT all on the same
+ * profile: the orchestrator runs on the `cofounder` profile, and each role
+ * runs on its OWN dedicated profile (`cofounder-<role>`, see
+ * `roleProfileName` in lib/cofounder/bootstrap.ts). This is what makes
+ * delegation real — a role's kanban tasks can be genuinely dispatched to that
+ * profile, and its chat tab IS that profile's own session history, not a
+ * client-side simulation. A role's persona lives in its profile's own SOUL
+ * (installed at bootstrap), so no persona-seed history is needed on
+ * session.create. Events are routed to the owning chat by session_id.
  *
  * Every chat preserves the full single-session behavior that shipped before:
  * thinking/reasoning deltas, tool chips keyed by tool_id, clarify/approval
@@ -30,8 +34,12 @@
  *
  * CONTEXT PRESERVATION. When a session must be recreated (model change, WS
  * reconnect) we seed the new session with the prior thread via session.create's
- * `messages` param (persona seed first for roles, then the last ~40 turns) so
- * switching models mid-conversation keeps context.
+ * `messages` param (the last ~40 turns) so switching models mid-conversation
+ * keeps context.
+ *
+ * MODEL IS PER-AGENT. Each role is a separate profile now, so "the model" is a
+ * per-slot property (ChatSlot.model/provider/modelPinned), not a single global
+ * — setModel() applies to the active chat's own profile only.
  *
  * WORKSPACE. session.create is given `cwd: loadConfig().workspaceRoot` so the
  * agents' files land in the configured workspace, not the gateway launch dir.
@@ -60,7 +68,7 @@ import type {
   ToolStartPayload,
 } from "@/lib/hermes";
 import type { ChatMessage } from "@/lib/hermes";
-import { COFOUNDER_PROFILE } from "@/lib/cofounder/bootstrap";
+import { COFOUNDER_PROFILE, roleProfileName } from "@/lib/cofounder/bootstrap";
 import { AGENTS, agentById } from "@/lib/cofounder/roles";
 import { loadConfig } from "@/lib/cofounder/config";
 import { installWsLogging, logEvent } from "@/state/log";
@@ -156,6 +164,12 @@ export interface ChatSlot {
   sessions: SessionMeta[];
   /** True once we've fetched this agent's session list at least once. */
   sessionsLoaded: boolean;
+  /** This agent's own profile's current model + provider (display + next-session default). */
+  model: string | null;
+  provider: string | null;
+  /** True only after the founder explicitly picked a model via setModel for
+   * THIS agent — an adopted display id from session.info is not pinned. */
+  modelPinned: boolean;
 }
 
 function newSlot(agentId: string): ChatSlot {
@@ -171,7 +185,16 @@ function newSlot(agentId: string): ChatSlot {
     unread: false,
     sessions: [],
     sessionsLoaded: false,
+    model: null,
+    provider: null,
+    modelPinned: false,
   };
+}
+
+/** The real Hermes profile backing an agent's chat: cofounder itself, or its own role profile. */
+function agentProfile(agentId: string): string {
+  const agent = agentById(agentId);
+  return agent.orchestrator ? COFOUNDER_PROFILE : roleProfileName(agentId);
 }
 
 interface ChatState {
@@ -181,18 +204,10 @@ interface ChatState {
   activeAgent: string;
   /** Shared, chat-agnostic UI notice (model errors etc.). */
   notice: string | null;
-  /** Currently-selected model id + provider (applies to the next session of
-   * whichever chat is active). Shared across chats — it's the profile default. */
-  model: string | null;
-  provider: string | null;
-  /** True only after the user explicitly picked a model via setModel. Display
-   * models adopted from session.info are NOT pinned — feeding a short display
-   * id back into session.create as an override 400s on the backend. */
-  modelPinned: boolean;
 
   setActiveAgent: (agentId: string) => void;
   clearNotice: () => void;
-  /** Pick a model: persist as profile default + apply to future sessions. */
+  /** Pick a model for the ACTIVE chat's own profile; applies to its next session. */
   setModel: (model: string, provider: string) => Promise<void>;
 
   // ── Active-chat operations (delegate to the agent-scoped variants below) ──
@@ -266,40 +281,18 @@ function agentForTitle(title: string): string | null {
   return match ? match.id : null;
 }
 
-/** Seed the role persona invisibly via session.create's `messages` param. */
-function personaSeed(agentId: string): ChatMessage[] {
-  const agent = agentById(agentId);
-  if (agent.orchestrator) return [];
-  const role = agent.id;
-  return [
-    {
-      role: "user",
-      content:
-        `You are acting as the ${role} agent for this company. ` +
-        `Load and follow your ${role} skill and its workspace conventions. ` +
-        `Stay in the ${role} role for this entire conversation — answer as the ${role} specialist, ` +
-        `not as the general orchestrator.`,
-    },
-    {
-      role: "assistant",
-      content: `Understood — I'm your ${role} agent. How can I help with ${role}?`,
-    },
-  ] as ChatMessage[];
-}
-
 /**
- * Build the seed history for a *recreated* session: the persona seed (roles
- * only) followed by the last CONTEXT_SEED_CAP rendered turns of this slot, so a
- * model switch / reconnect keeps the conversation's context. Rendered messages
- * only carry user/assistant text — exactly the shape session.create accepts.
+ * Build the seed history for a *recreated* session: the last CONTEXT_SEED_CAP
+ * rendered turns of this slot, so a model switch / reconnect keeps the
+ * conversation's context. No persona seed needed — a role's persona lives in
+ * its own profile's SOUL. Rendered messages only carry user/assistant text —
+ * exactly the shape session.create accepts.
  */
-function contextSeed(agentId: string, msgs: ChatMsg[]): ChatMessage[] {
-  const seed = personaSeed(agentId);
-  const prior = msgs
+function contextSeed(_agentId: string, msgs: ChatMsg[]): ChatMessage[] {
+  return msgs
     .filter((m) => m.text.trim() && !m.error)
     .slice(-CONTEXT_SEED_CAP)
     .map((m) => ({ role: m.role, content: m.text })) as ChatMessage[];
-  return [...seed, ...prior];
 }
 
 const initialChats: Record<string, ChatSlot> = Object.fromEntries(
@@ -310,9 +303,6 @@ export const useChat = create<ChatState>((set, get) => ({
   chats: initialChats,
   activeAgent: "cofounder",
   notice: null,
-  model: null,
-  provider: null,
-  modelPinned: false,
 
   clearNotice: () => set({ notice: null }),
 
@@ -325,31 +315,31 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   setModel: async (model: string, provider: string) => {
-    const prev = { model: get().model, provider: get().provider };
-    // Optimistic UI. New sessions bind this via session.create's model param;
-    // drop every chat's LIVE session so each recreates on next send with the
-    // new model. We keep `messages` intact + clear sessionKey so the next
-    // ensureSessionFor re-seeds the thread's context into the fresh session
-    // (a mid-run switch would corrupt the active stream otherwise).
-    set((s) => ({
+    const agentId = get().activeAgent;
+    const prevSlot = get().chats[agentId];
+    const prev = { model: prevSlot?.model ?? null, provider: prevSlot?.provider ?? null };
+    // Optimistic UI, scoped to THIS agent's own profile — each role has its
+    // own profile now, so a model choice on one chat must not touch another's.
+    // Drop the LIVE session so it recreates on next send with the new model;
+    // keep `messages` + clear sessionKey so ensureSessionFor re-seeds context
+    // into the fresh session (a mid-run switch would corrupt the active stream
+    // otherwise).
+    patchChat(set, agentId, () => ({
       model,
       provider,
       modelPinned: true,
-      chats: Object.fromEntries(
-        Object.entries(s.chats).map(([k, c]) => [
-          k,
-          { ...c, sessionId: null, sessionKey: null },
-        ]),
-      ),
+      sessionId: null,
+      sessionKey: null,
     }));
-    // The recreated sessions are new stored rows; forget the persisted actives
+    // The recreated session is a new stored row; forget the persisted active
     // so startup doesn't try to resume a superseded key.
-    for (const a of AGENTS) persistActiveSession(a.id, null);
-    logEvent("info", "model", `setModel ${provider}/${model}`);
+    persistActiveSession(agentId, null);
+    logEvent("info", "model", `setModel(${agentId}) ${provider}/${model}`);
     try {
-      await hermesRest.setProfileModel(COFOUNDER_PROFILE, provider, model);
+      await hermesRest.setProfileModel(agentProfile(agentId), provider, model);
     } catch (err) {
-      set({ ...prev, notice: `Couldn't set model: ${String(err)}` });
+      patchChat(set, agentId, () => ({ ...prev }));
+      set({ notice: `Couldn't set model: ${String(err)}` });
       logEvent("error", "model", `setProfileModel failed: ${String(err)}`);
     }
   },
@@ -490,7 +480,7 @@ export const useChat = create<ChatState>((set, get) => ({
       statusText: null,
     }));
     try {
-      await createSessionFor(set, get, agentId, personaSeed(agentId));
+      await createSessionFor(set, get, agentId, []);
       await get().loadSessions(agentId);
     } catch (err) {
       set({ notice: `Couldn't start a new session: ${String(err)}` });
@@ -562,10 +552,11 @@ async function createSessionFor(
   agentId: string,
   seed: ChatMessage[],
 ): Promise<string> {
-  const { model, provider, modelPinned } = get();
+  const slot = get().chats[agentId];
+  const { model, provider, modelPinned } = slot ?? { model: null, provider: null, modelPinned: false };
   const cwd = loadConfig()?.workspaceRoot;
   const res = await sessions.create({
-    profile: COFOUNDER_PROFILE,
+    profile: agentProfile(agentId),
     source: APP_SOURCE,
     // Persist the workspace root so agent file writes land where the founder
     // configured, not in the gateway's launch dir (~/Cofounder-Workspace).
@@ -574,30 +565,26 @@ async function createSessionFor(
     // session, orchestrator included.
     title: sessionTitle(agentId),
     ...(seed.length ? { messages: seed } : {}),
-    // Only send a model override the USER picked — an adopted display id
-    // (e.g. "deepseek-v4-flash-free") is not a valid create-time model id.
+    // Only send a model override the founder picked FOR THIS agent — an
+    // adopted display id (e.g. "deepseek-v4-flash-free") is not a valid
+    // create-time model id.
     ...(modelPinned && model ? { model } : {}),
     ...(modelPinned && provider ? { provider } : {}),
   });
   logEvent("info", "session", `session.create ok ${agentId}`, {
+    profile: agentProfile(agentId),
     session_id: res.session_id,
     key: res.stored_session_id,
     cwd: res.info?.cwd,
   });
   persistActiveSession(agentId, res.stored_session_id);
-  set((s) => ({
-    // Adopt the session's actual model as the display source of truth.
-    model: (res.info?.model as string | undefined) ?? s.model,
-    provider: (res.info?.provider as string | undefined) ?? s.provider,
-    chats: {
-      ...s.chats,
-      [agentId]: {
-        ...s.chats[agentId],
-        sessionId: res.session_id,
-        sessionKey: res.stored_session_id,
-        connecting: false,
-      },
-    },
+  patchChat(set, agentId, (c) => ({
+    // Adopt the session's actual model as this agent's display source of truth.
+    model: (res.info?.model as string | undefined) ?? c.model,
+    provider: (res.info?.provider as string | undefined) ?? c.provider,
+    sessionId: res.session_id,
+    sessionKey: res.stored_session_id,
+    connecting: false,
   }));
   return res.session_id;
 }
@@ -615,7 +602,7 @@ async function tryResume(
   key: string,
 ): Promise<string | null> {
   try {
-    const res = await sessions.resume(key, { profile: COFOUNDER_PROFILE });
+    const res = await sessions.resume(key, { profile: agentProfile(agentId) });
     const rendered = historyToChatMsgs(res.messages ?? []);
     persistActiveSession(agentId, res.session_key || key);
     set((s) => ({
