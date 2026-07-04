@@ -11,7 +11,7 @@ import RightPanel, { type PanelTab } from "./RightPanel";
 import Onboarding from "./Onboarding";
 import { initConnection } from "@/state/connection";
 import { loadConfig, type CofounderConfig } from "@/lib/cofounder/config";
-import { cofounderProfileExists } from "@/lib/cofounder/bootstrap";
+import { cofounderProfileExists, ensureSoulCurrent } from "@/lib/cofounder/bootstrap";
 import { useChat } from "@/state/chat";
 import { hermesRest } from "@/lib/hermes";
 
@@ -80,6 +80,13 @@ export default function AppShell() {
       cancelled = true;
     };
   }, []);
+
+  // Once ready, make sure the live SOUL carries the configured workspace root
+  // (heals installs bootstrapped before the SOUL embedded it). Best-effort.
+  useEffect(() => {
+    if (gate !== "ready" || !config?.workspaceRoot) return;
+    void ensureSoulCurrent(config.workspaceRoot).catch(() => {});
+  }, [gate, config?.workspaceRoot]);
 
   // Once ready, try to populate canvas artifact cards from the workspace.
   useEffect(() => {
