@@ -17,6 +17,29 @@
  * existing callers (AppShell.onSendToChat, CofounderTab, ModelPicker) keep
  * working unchanged. `activeAgent` / `setActiveAgent` select which chat is live.
  *
+ * SESSIONS-PER-AGENT. Each agent chat owns a *list* of past sessions and one
+ * active session at a time. The list comes from session.list filtered to this
+ * app's rows (source === APP_SOURCE) with the agent parsed from the title tag.
+ * The active stored key is persisted in localStorage per agent and resumed on
+ * startup/reconnect (session.resume returns a fresh live session_id + the full
+ * transcript). Two identities matter and MUST NOT be confused:
+ *   • sessionId  — the LIVE gateway session id (from create/resume). Events are
+ *                  routed by this. It changes every resume.
+ *   • sessionKey — the STORED session key (session.list `id`). Stable across
+ *                  resumes; what session.list/resume(target)/delete operate on.
+ *
+ * CONTEXT PRESERVATION. When a session must be recreated (model change, WS
+ * reconnect) we seed the new session with the prior thread via session.create's
+ * `messages` param (persona seed first for roles, then the last ~40 turns) so
+ * switching models mid-conversation keeps context.
+ *
+ * WORKSPACE. session.create is given `cwd: loadConfig().workspaceRoot` so the
+ * agents' files land in the configured workspace, not the gateway launch dir.
+ *
+ * DIAGNOSTICS. A per-slot watchdog surfaces a notice if prompt.submit succeeds
+ * but no stream event arrives within WATCHDOG_MS; see src/state/log.ts for the
+ * ring-buffer trail wired via installWsLogging().
+ *
  * All backend I/O goes through src/lib/hermes (sessions singleton + hermesWs).
  */
 
@@ -29,6 +52,7 @@ import type {
   HermesEvent,
   MessageCompletePayload,
   MessageDeltaPayload,
+  SessionListItem,
   StatusUpdatePayload,
   ThinkingDeltaPayload,
   ToolCompletePayload,
@@ -38,9 +62,23 @@ import type {
 import type { ChatMessage } from "@/lib/hermes";
 import { COFOUNDER_PROFILE } from "@/lib/cofounder/bootstrap";
 import { AGENTS, agentById } from "@/lib/cofounder/roles";
+import { loadConfig } from "@/lib/cofounder/config";
+import { installWsLogging, logEvent } from "@/state/log";
 
 /** Cap on stored thinking text so a long reasoning trace can't bloat memory. */
 const THINKING_CAP = 20_000;
+
+/** How many prior turns to re-seed when recreating a session (model change etc). */
+const CONTEXT_SEED_CAP = 40;
+
+/** Watchdog: if no stream event lands this long after prompt.submit, warn. */
+const WATCHDOG_MS = 20_000;
+
+/** session.list `source` tag that marks a session as owned by this app. */
+export const APP_SOURCE = "cofounder-app";
+
+/** localStorage key holding the per-agent active stored session key. */
+const ACTIVE_SESSIONS_KEY = "cofounder.activeSessions.v1";
 
 export interface ToolChip {
   id: string;
@@ -89,10 +127,23 @@ export interface ChatMsg {
   startedAt?: number;
 }
 
+/** A past/stored session for an agent, as shown in the per-agent switcher. */
+export interface SessionMeta {
+  /** Stored session key (session.list `id`) — stable across resumes. */
+  key: string;
+  title: string;
+  preview: string;
+  startedAt: number;
+  messageCount: number;
+}
+
 /** Everything that is per-chat (one per agent). */
 export interface ChatSlot {
   agentId: string;
+  /** Live gateway session id (events route by this). Null until created. */
   sessionId: string | null;
+  /** Stored session key (session.list id) backing the live session, if known. */
+  sessionKey: string | null;
   connecting: boolean;
   streaming: boolean;
   messages: ChatMsg[];
@@ -101,18 +152,25 @@ export interface ChatSlot {
   pendingClarify: ClarifyPrompt | null;
   /** True while this chat has streamed content the user hasn't viewed. */
   unread: boolean;
+  /** This agent's stored sessions (for the session switcher). */
+  sessions: SessionMeta[];
+  /** True once we've fetched this agent's session list at least once. */
+  sessionsLoaded: boolean;
 }
 
 function newSlot(agentId: string): ChatSlot {
   return {
     agentId,
     sessionId: null,
+    sessionKey: null,
     connecting: false,
     streaming: false,
     messages: [],
     statusText: null,
     pendingClarify: null,
     unread: false,
+    sessions: [],
+    sessionsLoaded: false,
   };
 }
 
@@ -139,24 +197,79 @@ interface ChatState {
 
   // ── Active-chat operations (delegate to the agent-scoped variants below) ──
   ensureSession: () => Promise<string>;
-  send: (text: string) => Promise<void>;
+  /**
+   * Send to the active chat. `text` is what the USER BUBBLE renders; the
+   * optional `promptText` is what's actually submitted to the model (used for
+   * task-tag expansion — the bubble keeps `#[Title]`, the model gets the
+   * bracketed context line). Defaults to `text`.
+   */
+  send: (text: string, promptText?: string) => Promise<void>;
   answerClarify: (requestId: string, answer: string) => Promise<void>;
   respondApproval: (choice: "allow" | "deny", all?: boolean) => Promise<void>;
   interrupt: () => Promise<void>;
 
   // ── Agent-scoped variants (used by the active-chat wrappers + directly) ──
   ensureSessionFor: (agentId: string) => Promise<string>;
-  sendTo: (agentId: string, text: string) => Promise<void>;
+  sendTo: (agentId: string, text: string, promptText?: string) => Promise<void>;
+
+  // ── Sessions-per-agent ──
+  /** Refresh the given agent's stored session list from session.list. */
+  loadSessions: (agentId: string) => Promise<void>;
+  /** Start a brand-new empty session for the agent (persona-seeded for roles). */
+  newSession: (agentId: string) => Promise<void>;
+  /** Switch the agent to a stored session: resume it + render its history. */
+  switchSession: (agentId: string, key: string) => Promise<void>;
+  /** Delete a stored session (must not be the live/active one). */
+  deleteSession: (agentId: string, key: string) => Promise<void>;
 }
 
 let subscribed = false;
 let uid = 0;
 const nextId = () => `m${Date.now()}_${++uid}`;
 
+// ── active-session persistence (per agent) ───────────────────────────────────
+
+function loadActiveSessions(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(ACTIVE_SESSIONS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistActiveSession(agentId: string, key: string | null): void {
+  try {
+    const map = loadActiveSessions();
+    if (key) map[agentId] = key;
+    else delete map[agentId];
+    localStorage.setItem(ACTIVE_SESSIONS_KEY, JSON.stringify(map));
+  } catch {
+    /* private-mode / quota — non-fatal */
+  }
+}
+
+// ── titles: encode the agent into the title so session.list can be filtered ──
+
+/** Build the create-time title, e.g. "Marketing — Jul 4". */
+function sessionTitle(agentId: string): string {
+  const label = agentById(agentId).label;
+  const date = new Date().toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `${label} — ${date}`;
+}
+
+/** Which agent owns a stored session, parsed from its title tag. Null if none. */
+function agentForTitle(title: string): string | null {
+  const head = (title.split("—")[0] ?? "").trim().toLowerCase();
+  if (!head) return null;
+  const match = AGENTS.find((a) => a.label.toLowerCase() === head);
+  return match ? match.id : null;
+}
+
 /** Seed the role persona invisibly via session.create's `messages` param. */
-function personaSeed(agentId: string): ChatMessage[] | undefined {
+function personaSeed(agentId: string): ChatMessage[] {
   const agent = agentById(agentId);
-  if (agent.orchestrator) return undefined;
+  if (agent.orchestrator) return [];
   const role = agent.id;
   return [
     {
@@ -172,6 +285,21 @@ function personaSeed(agentId: string): ChatMessage[] | undefined {
       content: `Understood — I'm your ${role} agent. How can I help with ${role}?`,
     },
   ] as ChatMessage[];
+}
+
+/**
+ * Build the seed history for a *recreated* session: the persona seed (roles
+ * only) followed by the last CONTEXT_SEED_CAP rendered turns of this slot, so a
+ * model switch / reconnect keeps the conversation's context. Rendered messages
+ * only carry user/assistant text — exactly the shape session.create accepts.
+ */
+function contextSeed(agentId: string, msgs: ChatMsg[]): ChatMessage[] {
+  const seed = personaSeed(agentId);
+  const prior = msgs
+    .filter((m) => m.text.trim() && !m.error)
+    .slice(-CONTEXT_SEED_CAP)
+    .map((m) => ({ role: m.role, content: m.text })) as ChatMessage[];
+  return [...seed, ...prior];
 }
 
 const initialChats: Record<string, ChatSlot> = Object.fromEntries(
@@ -199,20 +327,30 @@ export const useChat = create<ChatState>((set, get) => ({
   setModel: async (model: string, provider: string) => {
     const prev = { model: get().model, provider: get().provider };
     // Optimistic UI. New sessions bind this via session.create's model param;
-    // drop every chat's session so each recreates on next send with the new
-    // model (a mid-run switch would corrupt the active stream otherwise).
+    // drop every chat's LIVE session so each recreates on next send with the
+    // new model. We keep `messages` intact + clear sessionKey so the next
+    // ensureSessionFor re-seeds the thread's context into the fresh session
+    // (a mid-run switch would corrupt the active stream otherwise).
     set((s) => ({
       model,
       provider,
       modelPinned: true,
       chats: Object.fromEntries(
-        Object.entries(s.chats).map(([k, c]) => [k, { ...c, sessionId: null }]),
+        Object.entries(s.chats).map(([k, c]) => [
+          k,
+          { ...c, sessionId: null, sessionKey: null },
+        ]),
       ),
     }));
+    // The recreated sessions are new stored rows; forget the persisted actives
+    // so startup doesn't try to resume a superseded key.
+    for (const a of AGENTS) persistActiveSession(a.id, null);
+    logEvent("info", "model", `setModel ${provider}/${model}`);
     try {
       await hermesRest.setProfileModel(COFOUNDER_PROFILE, provider, model);
     } catch (err) {
       set({ ...prev, notice: `Couldn't set model: ${String(err)}` });
+      logEvent("error", "model", `setProfileModel failed: ${String(err)}`);
     }
   },
 
@@ -223,33 +361,18 @@ export const useChat = create<ChatState>((set, get) => ({
     try {
       if (hermesWs.connectionState !== "open") await hermesWs.connect();
       subscribeEvents();
-      const { model, provider, modelPinned } = get();
-      const agent = agentById(agentId);
-      const res = await sessions.create({
-        profile: COFOUNDER_PROFILE,
-        source: "cofounder-app",
-        close_on_disconnect: true,
-        ...(agent.orchestrator ? {} : { title: agent.label }),
-        ...(personaSeed(agentId) ? { messages: personaSeed(agentId) } : {}),
-        // Only send a model override the USER picked — an adopted display id
-        // (e.g. "deepseek-v4-flash-free") is not a valid create-time model id.
-        ...(modelPinned && model ? { model } : {}),
-        ...(modelPinned && provider ? { provider } : {}),
-      });
-      // NOTE: res.info.profile_name reflects the backend's LAUNCH profile, not
-      // this session's binding — session.create binds HERMES_HOME to the
-      // `profile` param's home each turn (verified in server.py). We don't use
-      // it for detection; the onboarding gate guarantees the profile exists.
-      set((s) => ({
-        // Adopt the session's actual model as the display source of truth.
-        model: (res.info?.model as string | undefined) ?? s.model,
-        provider: (res.info?.provider as string | undefined) ?? s.provider,
-        chats: {
-          ...s.chats,
-          [agentId]: { ...s.chats[agentId], sessionId: res.session_id, connecting: false },
-        },
-      }));
-      return res.session_id;
+
+      const slot = get().chats[agentId];
+      // Try to resume a persisted stored session first, so a chat survives WS
+      // reconnects / app restarts instead of always creating a fresh, empty one.
+      const persistedKey = slot?.sessionKey ?? loadActiveSessions()[agentId];
+      if (persistedKey) {
+        const resumed = await tryResume(set, get, agentId, persistedKey);
+        if (resumed) return resumed;
+      }
+
+      const sid = await createSessionFor(set, get, agentId, contextSeed(agentId, slot?.messages ?? []));
+      return sid;
     } catch (err) {
       patchChat(set, agentId, () => ({ connecting: false }));
       set({ notice: `Couldn't start ${agentById(agentId).label}: ${String(err)}` });
@@ -259,14 +382,16 @@ export const useChat = create<ChatState>((set, get) => ({
 
   ensureSession: () => get().ensureSessionFor(get().activeAgent),
 
-  sendTo: async (agentId: string, text: string) => {
+  sendTo: async (agentId: string, text: string, promptText?: string) => {
     const clean = text.trim();
     if (!clean) return;
+    // What the model receives (task-tag-expanded); falls back to the bubble text.
+    const prompt = (promptText ?? text).trim() || clean;
     const chat = get().chats[agentId];
     if (!chat) return;
     // If a clarify is pending in this chat, a "send" IS the answer.
     if (chat.pendingClarify) {
-      await answerClarifyFor(get, set, agentId, chat.pendingClarify.requestId, clean);
+      await answerClarifyFor(get, set, agentId, chat.pendingClarify.requestId, prompt);
       return;
     }
     // Never fire prompt.submit while a run is in flight (would deadlock / no-op).
@@ -286,8 +411,11 @@ export const useChat = create<ChatState>((set, get) => ({
           { id: nextId(), role: "assistant", text: "", streaming: true, tools: [], startedAt: Date.now() },
         ],
       }));
-      await sessions.submitPrompt(sid, clean);
+      logEvent("info", "session", `prompt.submit → ${agentId} (${sid})`);
+      await sessions.submitPrompt(sid, prompt);
+      armWatchdog(set, get, agentId, sid);
     } catch (err) {
+      logEvent("error", "session", `send failed (${agentId}): ${String(err)}`);
       patchChat(set, agentId, (c) => ({
         streaming: false,
         messages: patchLastAssistant(c.messages, (m) => ({
@@ -300,7 +428,8 @@ export const useChat = create<ChatState>((set, get) => ({
     }
   },
 
-  send: (text: string) => get().sendTo(get().activeAgent, text),
+  send: (text: string, promptText?: string) =>
+    get().sendTo(get().activeAgent, text, promptText),
 
   answerClarify: (requestId: string, answer: string) =>
     answerClarifyFor(get, set, get().activeAgent, requestId, answer),
@@ -321,31 +450,224 @@ export const useChat = create<ChatState>((set, get) => ({
 
   interrupt: async () => {
     const agentId = get().activeAgent;
-    const sid = get().chats[agentId]?.sessionId;
-    if (!sid) return;
+    await interruptFor(set, get, agentId);
+  },
+
+  // ── Sessions-per-agent ──────────────────────────────────────────────────
+
+  loadSessions: async (agentId: string) => {
     try {
-      await sessions.interrupt(sid);
-    } catch {
-      /* best-effort */
+      if (hermesWs.connectionState !== "open") await hermesWs.connect();
+      const res = await sessions.list(200);
+      const mine = (res.sessions ?? [])
+        .filter((s: SessionListItem) => (s.source || "").toLowerCase() === APP_SOURCE)
+        .filter((s: SessionListItem) => agentForTitle(s.title) === agentId)
+        .map(
+          (s: SessionListItem): SessionMeta => ({
+            key: s.id,
+            title: s.title,
+            preview: s.preview,
+            startedAt: s.started_at,
+            messageCount: s.message_count,
+          }),
+        );
+      patchChat(set, agentId, () => ({ sessions: mine, sessionsLoaded: true }));
+    } catch (err) {
+      logEvent("warn", "session", `loadSessions(${agentId}) failed: ${String(err)}`);
+      patchChat(set, agentId, () => ({ sessionsLoaded: true }));
     }
-    patchChat(set, agentId, (c) => ({
+  },
+
+  newSession: async (agentId: string) => {
+    // Detach from any live/persisted session and clear the thread, then create.
+    persistActiveSession(agentId, null);
+    patchChat(set, agentId, () => ({
+      sessionId: null,
+      sessionKey: null,
+      messages: [],
       streaming: false,
-      statusText: null,
       pendingClarify: null,
-      messages: patchLastAssistant(c.messages, (m) => ({
-        ...m,
-        streaming: false,
-        activity: undefined,
-        thinking: m.thinking ? { ...m.thinking, active: false } : undefined,
-        text: m.text || "(interrupted)",
-      })),
+      statusText: null,
     }));
+    try {
+      await createSessionFor(set, get, agentId, personaSeed(agentId));
+      await get().loadSessions(agentId);
+    } catch (err) {
+      set({ notice: `Couldn't start a new session: ${String(err)}` });
+    }
+  },
+
+  switchSession: async (agentId: string, key: string) => {
+    if (get().chats[agentId]?.sessionKey === key && get().chats[agentId]?.sessionId) return;
+    patchChat(set, agentId, () => ({
+      connecting: true,
+      messages: [],
+      streaming: false,
+      pendingClarify: null,
+      statusText: null,
+    }));
+    try {
+      if (hermesWs.connectionState !== "open") await hermesWs.connect();
+      subscribeEvents();
+      const ok = await tryResume(set, get, agentId, key);
+      if (!ok) throw new Error("resume returned no session");
+    } catch (err) {
+      patchChat(set, agentId, () => ({ connecting: false }));
+      set({ notice: `Couldn't open that session: ${String(err)}` });
+    }
+  },
+
+  deleteSession: async (agentId: string, key: string) => {
+    const slot = get().chats[agentId];
+    // Deleting the currently-open session: detach it first (the backend refuses
+    // to delete a live session). We close the live session then delete the row.
+    const isActive = slot?.sessionKey === key;
+    try {
+      if (isActive && slot?.sessionId) {
+        try {
+          await sessions.close(slot.sessionId);
+        } catch {
+          /* best-effort — the delete still needs it detached */
+        }
+        persistActiveSession(agentId, null);
+        patchChat(set, agentId, () => ({
+          sessionId: null,
+          sessionKey: null,
+          messages: [],
+          streaming: false,
+          pendingClarify: null,
+          statusText: null,
+        }));
+      }
+      await sessions.delete(key);
+    } catch (err) {
+      set({ notice: `Couldn't delete session: ${String(err)}` });
+      logEvent("warn", "session", `delete(${key}) failed: ${String(err)}`);
+    }
+    await get().loadSessions(agentId);
   },
 }));
 
+// ── session lifecycle helpers ────────────────────────────────────────────────
+
+/**
+ * Create a fresh live session for an agent with the given seed history. Sets
+ * cwd to the configured workspace, tags source + title so it's discoverable via
+ * session.list, and applies a user-pinned model override. Drops
+ * close_on_disconnect so the stored session survives WS drops and can resume.
+ */
+async function createSessionFor(
+  set: ZSet,
+  get: () => ChatState,
+  agentId: string,
+  seed: ChatMessage[],
+): Promise<string> {
+  const { model, provider, modelPinned } = get();
+  const cwd = loadConfig()?.workspaceRoot;
+  const res = await sessions.create({
+    profile: COFOUNDER_PROFILE,
+    source: APP_SOURCE,
+    // Persist the workspace root so agent file writes land where the founder
+    // configured, not in the gateway's launch dir (~/Cofounder-Workspace).
+    ...(cwd ? { cwd } : {}),
+    // A title is required to route session.list back to this agent — tag every
+    // session, orchestrator included.
+    title: sessionTitle(agentId),
+    ...(seed.length ? { messages: seed } : {}),
+    // Only send a model override the USER picked — an adopted display id
+    // (e.g. "deepseek-v4-flash-free") is not a valid create-time model id.
+    ...(modelPinned && model ? { model } : {}),
+    ...(modelPinned && provider ? { provider } : {}),
+  });
+  logEvent("info", "session", `session.create ok ${agentId}`, {
+    session_id: res.session_id,
+    key: res.stored_session_id,
+    cwd: res.info?.cwd,
+  });
+  persistActiveSession(agentId, res.stored_session_id);
+  set((s) => ({
+    // Adopt the session's actual model as the display source of truth.
+    model: (res.info?.model as string | undefined) ?? s.model,
+    provider: (res.info?.provider as string | undefined) ?? s.provider,
+    chats: {
+      ...s.chats,
+      [agentId]: {
+        ...s.chats[agentId],
+        sessionId: res.session_id,
+        sessionKey: res.stored_session_id,
+        connecting: false,
+      },
+    },
+  }));
+  return res.session_id;
+}
+
+/**
+ * Resume a stored session (by its stable key) into the agent's slot. Returns
+ * the new live session_id, or null on failure. session.resume returns a fresh
+ * live id plus the full display transcript, which we render into the thread
+ * (mapping {role,text} history entries to ChatMsg; tool-only entries drop out).
+ */
+async function tryResume(
+  set: ZSet,
+  get: () => ChatState,
+  agentId: string,
+  key: string,
+): Promise<string | null> {
+  try {
+    const res = await sessions.resume(key, { profile: COFOUNDER_PROFILE });
+    const rendered = historyToChatMsgs(res.messages ?? []);
+    persistActiveSession(agentId, res.session_key || key);
+    set((s) => ({
+      chats: {
+        ...s.chats,
+        [agentId]: {
+          ...s.chats[agentId],
+          sessionId: res.session_id,
+          sessionKey: res.session_key || key,
+          connecting: false,
+          messages: rendered,
+          streaming: false,
+          pendingClarify: null,
+          statusText: null,
+        },
+      },
+    }));
+    logEvent("info", "session", `resume ok ${agentId}`, {
+      key,
+      session_id: res.session_id,
+      count: rendered.length,
+    });
+    return res.session_id;
+  } catch (err) {
+    logEvent("warn", "session", `resume(${key}) failed: ${String(err)}`);
+    // Forget a stale persisted key so we fall back to a fresh create.
+    if (get().chats[agentId]?.sessionKey === key) persistActiveSession(agentId, null);
+    return null;
+  }
+}
+
+/**
+ * Map session.history / session.resume `messages` to renderable ChatMsg. The
+ * backend returns user/assistant entries as {role, text} and tool entries as
+ * {role:"tool", name, context}; we render only the user/assistant text, which
+ * skips the invisible persona-seed pair too (it carries a fixed assistant ack —
+ * we keep it since it reads as a benign greeting, but drop tool rows).
+ */
+function historyToChatMsgs(messages: Array<{ role?: string; text?: unknown }>): ChatMsg[] {
+  const out: ChatMsg[] = [];
+  for (const m of messages) {
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    const text = typeof m.text === "string" ? m.text : "";
+    if (!text.trim()) continue;
+    out.push({ id: nextId(), role: m.role, text });
+  }
+  return out;
+}
+
 /** Shared clarify handler used by both the active + agent-scoped entry points. */
 async function answerClarifyFor(
-  _get: () => ChatState,
+  get: () => ChatState,
   set: ZSet,
   agentId: string,
   requestId: string,
@@ -365,6 +687,8 @@ async function answerClarifyFor(
   }));
   try {
     await sessions.respondClarify(requestId, answer);
+    const sid = get().chats[agentId]?.sessionId;
+    if (sid) armWatchdog(set, get, agentId, sid);
   } catch (err) {
     set({ notice: `Clarify failed: ${String(err)}` });
     patchChat(set, agentId, (c) => ({
@@ -377,6 +701,144 @@ async function answerClarifyFor(
       })),
     }));
   }
+}
+
+/**
+ * Stop the agent's current run — reliably. session.interrupt is best-effort and
+ * silently no-ops if the run thread is gone, so we ALSO: (a) interrupt any
+ * active delegated sub-agents (subagent.interrupt per delegation.status entry),
+ * (b) force the UI out of streaming and finalize the bubble even if every RPC
+ * fails, and (c) recover the stuck case where the UI thinks it's streaming but
+ * session.status reports the agent is idle. Every attempt is logged.
+ */
+async function interruptFor(set: ZSet, get: () => ChatState, agentId: string): Promise<void> {
+  const slot = get().chats[agentId];
+  const sid = slot?.sessionId ?? null;
+  clearWatchdog(agentId);
+  logEvent("info", "interrupt", `stop requested (${agentId})`, { session_id: sid, streaming: slot?.streaming });
+
+  // (a) session.interrupt — always try when we have a live session.
+  if (sid) {
+    try {
+      const res = await sessions.interrupt(sid);
+      logEvent("info", "interrupt", `session.interrupt → ${res.status}`, { session_id: sid });
+    } catch (err) {
+      logEvent("warn", "interrupt", `session.interrupt failed: ${String(err)}`, { session_id: sid });
+    }
+    // (b) delegated sub-agents keep running even after the parent turn stops —
+    // ask each active one to stop too.
+    try {
+      const deleg = await sessions.delegationStatus();
+      const active = Array.isArray(deleg.active) ? deleg.active : [];
+      for (const entry of active) {
+        const subId = String((entry as { subagent_id?: unknown })?.subagent_id ?? "").trim();
+        if (!subId) continue;
+        try {
+          const r = await sessions.interruptSubagent(subId);
+          logEvent("info", "interrupt", `subagent.interrupt ${subId}`, r);
+        } catch (err) {
+          logEvent("warn", "interrupt", `subagent.interrupt ${subId} failed: ${String(err)}`);
+        }
+      }
+    } catch (err) {
+      logEvent("warn", "interrupt", `delegation.status failed: ${String(err)}`, String(err));
+    }
+  }
+
+  // (c) always finalize the bubble locally — never leave a stuck spinner.
+  patchChat(set, agentId, (c) => ({
+    streaming: false,
+    statusText: null,
+    pendingClarify: null,
+    messages: patchLastAssistant(c.messages, (m) =>
+      m.streaming
+        ? {
+            ...m,
+            streaming: false,
+            activity: undefined,
+            thinking: m.thinking ? { ...m.thinking, active: false } : undefined,
+            text: m.text || "(interrupted)",
+          }
+        : m,
+    ),
+  }));
+}
+
+/**
+ * Recover a stuck-streaming slot: if the UI still shows a run but session.status
+ * reports the agent is idle, the stream was silently dropped — clear it. Used by
+ * the watchdog and callable on demand. Best-effort; never throws.
+ */
+async function reconcileStreaming(set: ZSet, get: () => ChatState, agentId: string): Promise<boolean> {
+  const slot = get().chats[agentId];
+  const sid = slot?.sessionId;
+  if (!slot?.streaming || !sid) return false;
+  try {
+    const res = await sessions.status(sid);
+    const running = /Agent Running:\s*Yes/i.test(res.output || "");
+    logEvent("info", "watchdog", `status(${agentId}): ${running ? "running" : "idle"}`);
+    if (!running) {
+      patchChat(set, agentId, (c) => ({
+        streaming: false,
+        statusText: null,
+        messages: patchLastAssistant(c.messages, (m) =>
+          m.streaming
+            ? { ...m, streaming: false, activity: undefined, thinking: m.thinking ? { ...m.thinking, active: false } : undefined }
+            : m,
+        ),
+      }));
+      return true;
+    }
+  } catch (err) {
+    logEvent("warn", "watchdog", `status(${agentId}) failed: ${String(err)}`);
+  }
+  return false;
+}
+
+// ── watchdog: no-response detection after prompt.submit ──────────────────────
+
+const watchdogs = new Map<string, ReturnType<typeof setTimeout>>();
+/** Live session id being watched per agent, and whether a stream event landed. */
+const watchdogSids = new Map<string, string>();
+
+function clearWatchdog(agentId: string): void {
+  const t = watchdogs.get(agentId);
+  if (t) clearTimeout(t);
+  watchdogs.delete(agentId);
+  watchdogSids.delete(agentId);
+}
+
+/**
+ * Arm the per-agent watchdog after a successful prompt.submit: if no stream
+ * event (message.start/delta, thinking, tool.*) arrives for this session within
+ * WATCHDOG_MS, surface a notice + log it. We do NOT clear streaming purely on
+ * the timer — only if session.status confirms the agent is actually idle.
+ */
+function armWatchdog(set: ZSet, get: () => ChatState, agentId: string, sid: string): void {
+  clearWatchdog(agentId);
+  watchdogSids.set(agentId, sid);
+  watchdogs.set(
+    agentId,
+    setTimeout(() => {
+      watchdogs.delete(agentId);
+      // Stream may have already ended cleanly.
+      if (!get().chats[agentId]?.streaming) {
+        watchdogSids.delete(agentId);
+        return;
+      }
+      logEvent("warn", "watchdog", `no response from ${agentId} in ${WATCHDOG_MS / 1000}s`, { session_id: sid });
+      set({
+        notice: `${agentById(agentId).label}: no response from the model yet — check Logs / model config.`,
+      });
+      void reconcileStreaming(set, get, agentId);
+      watchdogSids.delete(agentId);
+    }, WATCHDOG_MS),
+  );
+}
+
+/** A stream event for `sid` arrived — the model is responding; disarm. */
+function noteStreamActivity(agentId: string): void {
+  if (watchdogs.has(agentId)) clearWatchdog(agentId);
 }
 
 // ── slot helpers ────────────────────────────────────────────────────────────
@@ -441,12 +903,16 @@ function markUnread(set: ZSet, agentId: string): void {
 function subscribeEvents(): void {
   if (subscribed) return;
   subscribed = true;
+  // Diagnostic ring-buffer trail (rpc/event/ws state) — install once alongside
+  // the event wiring so the Logs drawer has data from first connect.
+  installWsLogging();
   const { setState, getState } = useChat;
   const set: ZSet = setState;
 
   hermesWs.onEvent("message.start", (ev: HermesEvent) => {
     const agentId = routeAgent(ev);
     if (!agentId) return;
+    noteStreamActivity(agentId);
     patchChat(set, agentId, (c) => {
       const last = c.messages[c.messages.length - 1];
       if (last && last.role === "assistant" && last.streaming) return { streaming: true };
@@ -464,6 +930,7 @@ function subscribeEvents(): void {
   hermesWs.onEvent("message.delta", (ev: HermesEvent) => {
     const agentId = routeAgent(ev);
     if (!agentId) return;
+    noteStreamActivity(agentId);
     const p = ev.payload as MessageDeltaPayload | undefined;
     if (!p?.text) return;
     patchChat(set, agentId, (c) => ({
@@ -480,6 +947,7 @@ function subscribeEvents(): void {
   const onThinking = (ev: HermesEvent) => {
     const agentId = routeAgent(ev);
     if (!agentId) return;
+    noteStreamActivity(agentId);
     const p = ev.payload as ThinkingDeltaPayload | undefined;
     if (!p?.text) return;
     patchChat(set, agentId, (c) => ({
@@ -501,6 +969,7 @@ function subscribeEvents(): void {
   hermesWs.onEvent("message.complete", (ev: HermesEvent) => {
     const agentId = routeAgent(ev);
     if (!agentId) return;
+    noteStreamActivity(agentId);
     const p = ev.payload as MessageCompletePayload | undefined;
     patchChat(set, agentId, (c) => ({
       streaming: false,
@@ -527,6 +996,7 @@ function subscribeEvents(): void {
   hermesWs.onEvent("tool.generating", (ev: HermesEvent) => {
     const agentId = routeAgent(ev);
     if (!agentId) return;
+    noteStreamActivity(agentId);
     const p = ev.payload as ToolGeneratingPayload | undefined;
     const name = p?.name;
     if (!name) return;
@@ -542,6 +1012,7 @@ function subscribeEvents(): void {
   hermesWs.onEvent("tool.start", (ev: HermesEvent) => {
     const agentId = routeAgent(ev);
     if (!agentId) return;
+    noteStreamActivity(agentId);
     const p = (ev.payload ?? {}) as ToolStartPayload;
     const label = p.name || "tool";
     const id = String(p.tool_id ?? `${label}-${Date.now()}`);
@@ -573,6 +1044,7 @@ function subscribeEvents(): void {
   hermesWs.onEvent("clarify.request", (ev: HermesEvent) => {
     const agentId = routeAgent(ev);
     if (!agentId) return;
+    noteStreamActivity(agentId);
     const p = ev.payload as ClarifyRequestPayload | undefined;
     if (!p?.question || !p.request_id) return;
     const prompt: ClarifyPrompt = {
@@ -598,6 +1070,7 @@ function subscribeEvents(): void {
   hermesWs.onEvent("approval.request", (ev: HermesEvent) => {
     const agentId = routeAgent(ev);
     if (!agentId) return;
+    noteStreamActivity(agentId);
     const p = ev.payload as ApprovalRequestPayload | undefined;
     if (!p) return;
     patchChat(set, agentId, (c) => ({
@@ -612,6 +1085,7 @@ function subscribeEvents(): void {
   hermesWs.onEvent("error", (ev: HermesEvent) => {
     const agentId = routeAgent(ev);
     if (!agentId) return;
+    noteStreamActivity(agentId);
     const p = ev.payload as ErrorEventPayload | undefined;
     set({ notice: p?.message ?? "Backend error" });
     patchChat(set, agentId, (c) => ({
@@ -623,9 +1097,12 @@ function subscribeEvents(): void {
     }));
   });
 
-  // Reset every chat's session on disconnect so they recreate on next send.
+  // On WS drop, clear the LIVE session id (events would misroute otherwise) but
+  // KEEP the messages + persisted sessionKey so the next ensureSessionFor
+  // resumes the stored session (survives reconnects) instead of losing context.
   hermesWs.onState((st) => {
     if (st === "closed" || st === "error") {
+      for (const a of AGENTS) clearWatchdog(a.id);
       const chats = getState().chats;
       if (Object.values(chats).some((c) => c.sessionId)) {
         setState((s) => ({

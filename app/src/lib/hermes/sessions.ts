@@ -22,9 +22,11 @@ import type {
   SessionHistoryResult,
   SessionInterruptResult,
   SessionListResult,
+  SessionDeleteResult,
   SessionResumeResult,
   SessionStatusResult,
   SpawnTreeListResult,
+  SubagentInterruptResult,
 } from "./types";
 
 export interface SessionCreateParams {
@@ -89,6 +91,27 @@ export class HermesSessions {
 
   close(session_id: string): Promise<SessionCloseResult> {
     return this.ws.request<SessionCloseResult>("session.close", { session_id });
+  }
+
+  /**
+   * Permanently delete a stored session by its STABLE key (session.list `id`,
+   * a.k.a. session_key) — NOT a live session_id. The backend refuses to delete
+   * a session that is currently active in the gateway (error 4023), so detach
+   * (session.close) first. Verified server.py L5844.
+   */
+  delete(session_id: string): Promise<SessionDeleteResult> {
+    return this.ws.request<SessionDeleteResult>("session.delete", { session_id });
+  }
+
+  /**
+   * Ask a single running delegated sub-agent to stop at its next boundary.
+   * `subagent_id` comes from delegation.status's `active[]` entries. Verified
+   * server.py L7891 (params: { subagent_id }) → { found, subagent_id }.
+   */
+  interruptSubagent(subagent_id: string): Promise<SubagentInterruptResult> {
+    return this.ws.request<SubagentInterruptResult>("subagent.interrupt", {
+      subagent_id,
+    });
   }
 
   /** Submit a prompt; reply streams via message.delta / message.complete events. */

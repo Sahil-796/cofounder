@@ -17,8 +17,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useChat, type ChatSlot } from "@/state/chat";
 import { renderMarkdown } from "@/lib/markdown";
 import { useConnection } from "@/state/connection";
+import { useTasks } from "@/state/tasks";
 import { AGENTS, agentById } from "@/lib/cofounder/roles";
+import type { KanbanTask } from "@/lib/cofounder/extraRest";
 import ModelPicker from "./ModelPicker";
+import SessionSwitcher from "../chat/SessionSwitcher";
+import LogsDrawer from "../chat/LogsDrawer";
+import {
+  activeTaskQuery,
+  expandForModel,
+  insertTaskToken,
+} from "../chat/taskTags";
 
 /** Live-ticking elapsed seconds since `since` (epoch ms). */
 function useElapsed(since: number | undefined, running: boolean): number {
@@ -48,16 +57,41 @@ export default function CofounderTab() {
 
   const wsState = useConnection((s) => s.wsState);
   const [input, setInput] = useState("");
+  const [showLogs, setShowLogs] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Stick-to-bottom only when the user is already near the bottom; otherwise we
+  // leave their scroll position alone and show a "↓ latest" jump button.
+  const [atBottom, setAtBottom] = useState(true);
 
   // Open the active chat's session lazily when it becomes visible.
   useEffect(() => {
     void ensureSession().catch(() => {});
   }, [ensureSession, activeAgent]);
 
+  // Track whether the viewport is pinned to the bottom (within a small slack).
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setAtBottom(gap < 80);
+  };
+
+  // Only auto-follow new content when already at the bottom.
   useEffect(() => {
+    if (!atBottom) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, statusText]);
+  }, [messages, statusText, atBottom]);
+
+  // Switching agents / opening a session resets the view to the newest message.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    setAtBottom(true);
+  }, [activeAgent]);
+
+  const jumpToLatest = () => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    setAtBottom(true);
+  };
 
   const empty = messages.length === 0;
 
@@ -74,29 +108,39 @@ export default function CofounderTab() {
         </div>
       )}
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5">
-        {empty ? (
-          <EmptyChat connecting={connecting} wsState={wsState} />
-        ) : (
-          <div className="mx-auto flex max-w-2xl flex-col gap-4">
-            {messages.map((m) => (
-              <MessageBubble
-                key={m.id}
-                m={m}
-                agentEmoji={agent.emoji}
-                agentLabel={agent.label}
-                onClarify={answerClarify}
-                onApprove={() => respondApproval("allow")}
-                onDeny={() => respondApproval("deny")}
-              />
-            ))}
-            {statusText && (
-              <div className="flex items-center gap-2 pl-1 text-[12px] text-[#8a8a92]">
-                <Spinner />
-                <span>{statusText}</span>
-              </div>
-            )}
-          </div>
+      <div className="relative flex-1 overflow-hidden">
+        <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto px-4 py-5">
+          {empty ? (
+            <EmptyChat connecting={connecting} wsState={wsState} />
+          ) : (
+            <div className="mx-auto flex max-w-2xl flex-col gap-4">
+              {messages.map((m) => (
+                <MessageBubble
+                  key={m.id}
+                  m={m}
+                  agentEmoji={agent.emoji}
+                  agentLabel={agent.label}
+                  onClarify={answerClarify}
+                  onApprove={() => respondApproval("allow")}
+                  onDeny={() => respondApproval("deny")}
+                />
+              ))}
+              {statusText && (
+                <div className="flex items-center gap-2 pl-1 text-[12px] text-[#8a8a92]">
+                  <Spinner />
+                  <span>{statusText}</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {!empty && !atBottom && (
+          <button
+            onClick={jumpToLatest}
+            className="co-fadein absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-[#2a2b30] bg-[#1c1d21] px-3 py-1 text-[11.5px] text-[#c7c7cd] shadow-lg transition hover:bg-[#26272c]"
+          >
+            ↓ latest
+          </button>
         )}
       </div>
 
@@ -108,12 +152,17 @@ export default function CofounderTab() {
         agentEmoji={agent.emoji}
         agentLabel={agent.label}
         onSend={() => {
-          const t = input;
+          const raw = input;
           setInput("");
-          void send(t);
+          // The user bubble keeps the pretty `#[Title]` tokens; the model gets
+          // the expanded bracketed context line (title + status + id).
+          void send(raw, expandForModel(raw, useTasks.getState().kanban));
         }}
         onInterrupt={() => void interrupt()}
+        onOpenLogs={() => setShowLogs(true)}
       />
+
+      {showLogs && <LogsDrawer onClose={() => setShowLogs(false)} />}
     </div>
   );
 }
@@ -166,7 +215,32 @@ function AgentSwitcher() {
           </button>
         );
       })}
+      <SessionSwitcher />
     </div>
+  );
+}
+
+/** Render user text with `#[Task title]` tokens as inline tag chips. */
+function UserText({ text }: { text: string }) {
+  const parts = useMemo(() => text.split(/(#\[[^\]]+\])/g), [text]);
+  return (
+    <>
+      {parts.map((p, i) => {
+        const tag = /^#\[([^\]]+)\]$/.exec(p);
+        if (tag) {
+          return (
+            <span
+              key={i}
+              className="mx-0.5 inline-flex items-center gap-1 rounded-md bg-[#3a3b42] px-1.5 py-0.5 text-[12px] text-[#d7d7dc]"
+            >
+              <span className="text-[10px] text-[#9a9aa2]">#</span>
+              {tag[1]}
+            </span>
+          );
+        }
+        return <span key={i}>{p}</span>;
+      })}
+    </>
   );
 }
 
@@ -194,7 +268,7 @@ function MessageBubble({
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%] rounded-2xl rounded-br-md bg-[#2a2b30] px-3.5 py-2.5 text-[13.5px] leading-relaxed text-[#eaeaee]">
-          {m.text}
+          <UserText text={m.text} />
         </div>
       </div>
     );
@@ -216,23 +290,7 @@ function MessageBubble({
       {/* "Using X…" activity line — never a bare spinner */}
       {showActivity && <ActivityLine label={m.activity!.label} context={m.activity!.context} />}
 
-      {m.tools && m.tools.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {m.tools.map((t) => (
-            <span
-              key={t.id}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] ${
-                t.status === "running"
-                  ? "border-[#33343a] bg-[#1c1d21] text-[#c7c7cd]"
-                  : "border-[#243027] bg-[#16211a] text-[#8fd0a5]"
-              }`}
-            >
-              {t.status === "running" ? <Spinner small /> : <span>✓</span>}
-              {t.label}
-            </span>
-          ))}
-        </div>
-      )}
+      {m.tools && m.tools.length > 0 && <ToolSteps tools={m.tools} />}
 
       {(m.text || (m.streaming && !m.thinking?.active && !showActivity)) && (
         <div
@@ -292,6 +350,49 @@ function MessageBubble({
               Deny
             </button>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Compact tool-call summary: a single "N steps" / "N tool calls" line under the
+ * Thinking block, expanding on click to the full chip list. Keeps a long tool
+ * run from dominating the bubble while the count stays glanceable.
+ */
+function ToolSteps({ tools }: { tools: import("@/state/chat").ToolChip[] }) {
+  const [open, setOpen] = useState(false);
+  const running = tools.some((t) => t.status === "running");
+  const noun = tools.length === 1 ? "step" : "steps";
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 self-start rounded-full border border-[#26272c] bg-[#141518] px-2.5 py-0.5 text-[11px] text-[#9a9aa2] transition hover:text-[#c7c7cd]"
+      >
+        {running ? <Spinner small /> : <span className="text-emerald-400">✓</span>}
+        <span>
+          {tools.length} {noun}
+        </span>
+        <span className="text-[#5f5f67]">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div className="flex flex-wrap gap-1.5 pl-0.5">
+          {tools.map((t) => (
+            <span
+              key={t.id}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] ${
+                t.status === "running"
+                  ? "border-[#33343a] bg-[#1c1d21] text-[#c7c7cd]"
+                  : "border-[#243027] bg-[#16211a] text-[#8fd0a5]"
+              }`}
+            >
+              {t.status === "running" ? <Spinner small /> : <span>✓</span>}
+              {t.label}
+            </span>
+          ))}
         </div>
       )}
     </div>
@@ -382,6 +483,7 @@ function Composer({
   agentLabel,
   onSend,
   onInterrupt,
+  onOpenLogs,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -391,6 +493,7 @@ function Composer({
   agentLabel: string;
   onSend: () => void;
   onInterrupt: () => void;
+  onOpenLogs: () => void;
 }) {
   const answering = !!pendingClarify;
   // Submit is allowed when there's text AND either we're answering a clarify or
@@ -401,11 +504,41 @@ function Composer({
     if (answering) taRef.current?.focus();
   }, [answering]);
 
+  // Task-tag picker: track the caret so we can detect the active "#query".
+  const [caret, setCaret] = useState(0);
+  const query = answering ? null : activeTaskQuery(input, caret);
+  const pickerOpen = query !== null;
+
+  const pickTask = (t: KanbanTask) => {
+    const el = taRef.current;
+    const pos = el?.selectionStart ?? input.length;
+    const { text, caret: nextCaret } = insertTaskToken(input, pos, t.title);
+    setInput(text);
+    setCaret(nextCaret);
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(nextCaret, nextCaret);
+    });
+  };
+
+  const syncCaret = (el: HTMLTextAreaElement) => setCaret(el.selectionStart ?? 0);
+
   return (
-    <div className="border-t border-[#222327] px-4 py-3">
-      <div className="mb-2 flex items-center">
+    <div className="relative border-t border-[#222327] px-4 py-3">
+      <div className="mb-2 flex items-center gap-2">
         <ModelPicker />
+        <button
+          onClick={onOpenLogs}
+          title="Diagnostics / logs"
+          className="ml-auto inline-flex items-center gap-1 rounded-full border border-[#2a2b30] bg-[#17181b] px-2.5 py-1 text-[11px] text-[#8a8a92] transition hover:border-[#3a3b42] hover:text-[#c7c7cd]"
+        >
+          <span className="text-[11px]">🩺</span>
+          <span className="hidden sm:inline">Logs</span>
+        </button>
       </div>
+      {pickerOpen && (
+        <TaskPicker query={query!} onPick={pickTask} onDismiss={() => setCaret(-1)} />
+      )}
       <div
         className={`flex items-end gap-2 rounded-2xl border bg-[#141518] px-3 py-2.5 ${
           answering ? "border-[#c99b4e]/70 shadow-[0_0_0_3px_rgba(201,155,78,0.08)]" : "border-[#2a2b30]"
@@ -418,7 +551,12 @@ function Composer({
           ref={taRef}
           rows={1}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            syncCaret(e.target);
+          }}
+          onKeyUp={(e) => syncCaret(e.currentTarget)}
+          onClick={(e) => syncCaret(e.currentTarget)}
           onKeyDown={(e) => {
             if (e.key === "Escape" && streaming && !answering) {
               e.preventDefault();
@@ -431,7 +569,7 @@ function Composer({
             }
           }}
           placeholder={
-            answering ? `Answer ${agentLabel}…` : `Ask ${agentLabel} anything…`
+            answering ? `Answer ${agentLabel}…` : `Ask ${agentLabel} anything…  (type # to tag a task)`
           }
           className="max-h-32 flex-1 resize-none bg-transparent py-1 text-[13.5px] leading-relaxed text-[#e7e7ea] outline-none placeholder:text-[#5f5f67]"
         />
@@ -463,6 +601,79 @@ function Composer({
         <div className="mt-1.5 px-1 text-[10.5px] text-[#c99b4e]/80">
           Your reply answers {agentLabel}'s question above.
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Task-tag picker popover. Opens above the composer when the user types "#";
+ * lists kanban tasks (useTasks().kanban, refreshed once if empty) filtered by
+ * the live "#query". Selecting one inserts a `#[Title]` token. Dark, compact.
+ */
+function TaskPicker({
+  query,
+  onPick,
+  onDismiss,
+}: {
+  query: string;
+  onPick: (t: KanbanTask) => void;
+  onDismiss: () => void;
+}) {
+  const kanban = useTasks((s) => s.kanban);
+  const kanbanLoaded = useTasks((s) => s.kanbanLoaded);
+  const refresh = useTasks((s) => s.refresh);
+
+  // Pull the board once if we don't have it yet — the picker needs live titles.
+  useEffect(() => {
+    if (!kanbanLoaded && kanban.length === 0) void refresh();
+  }, [kanbanLoaded, kanban.length, refresh]);
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const rows = q ? kanban.filter((t) => t.title.toLowerCase().includes(q)) : kanban;
+    return rows.slice(0, 8);
+  }, [kanban, query]);
+
+  const statusColor: Record<string, string> = {
+    todo: "text-[#8a8a92]",
+    doing: "text-[#7ea6e0]",
+    in_progress: "text-[#7ea6e0]",
+    blocked: "text-amber-400",
+    done: "text-[#8fd0a5]",
+  };
+
+  return (
+    <div className="co-fadein absolute bottom-[86px] left-4 z-40 max-h-64 w-80 overflow-y-auto rounded-2xl border border-[#2a2b30] bg-[#141518] p-1.5 shadow-[0_16px_40px_-12px_rgba(0,0,0,0.85)]">
+      <div className="flex items-center justify-between px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#6a6a72]">
+        <span>Tag a task</span>
+        <button onClick={onDismiss} className="text-[#5f5f67] hover:text-[#9a9aa2]">
+          esc
+        </button>
+      </div>
+      {!kanbanLoaded ? (
+        <div className="px-2 py-4 text-center text-[12px] text-[#6a6a72]">loading tasks…</div>
+      ) : matches.length === 0 ? (
+        <div className="px-2 py-4 text-center text-[12px] text-[#6a6a72]">
+          {kanban.length === 0 ? "No tasks on the board yet." : "No matching tasks."}
+        </div>
+      ) : (
+        <ul>
+          {matches.map((t) => (
+            <li key={t.id}>
+              <button
+                onClick={() => onPick(t)}
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] text-[#c7c7cd] transition hover:bg-[#1a1b1f]"
+              >
+                <span className="text-[10px] text-[#6a6a72]">#</span>
+                <span className="flex-1 truncate">{t.title}</span>
+                <span className={`text-[10px] ${statusColor[t.status] ?? "text-[#8a8a92]"}`}>
+                  {t.status}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

@@ -219,6 +219,89 @@ export class HermesRest {
     return this.get<T>("/api/mcp/catalog");
   }
 
+  // ── Skills management (Library tab) ────────────────────────────────────────
+
+  /** GET /api/skills/content?name=&profile= — raw SKILL.md text for editing. */
+  skillContent<T = unknown>(name: string, profile?: string): Promise<T> {
+    const q = profile ? `&profile=${encodeURIComponent(profile)}` : "";
+    return this.get<T>(`/api/skills/content?name=${encodeURIComponent(name)}${q}`);
+  }
+
+  /** PUT /api/skills/content { name, content, profile } — full-rewrite an existing skill. */
+  updateSkillContent<T = unknown>(body: {
+    name: string;
+    content: string;
+    profile?: string;
+  }): Promise<T> {
+    return this.put<T>("/api/skills/content", body);
+  }
+
+  /** PUT /api/skills/toggle { name, enabled, profile } */
+  toggleSkill<T = unknown>(body: {
+    name: string;
+    enabled: boolean;
+    profile?: string;
+  }): Promise<T> {
+    return this.put<T>("/api/skills/toggle", body);
+  }
+
+  // ── MCP connectors (Library tab) ────────────────────────────────────────────
+
+  /** GET /api/mcp/servers?profile= — configured MCP servers for a profile. */
+  mcpServers<T = unknown>(profile?: string): Promise<T> {
+    const q = profile ? `?profile=${encodeURIComponent(profile)}` : "";
+    return this.get<T>(`/api/mcp/servers${q}`);
+  }
+
+  /** POST /api/mcp/servers { name, url?, command?, args?, env?, auth?, profile? } */
+  addMcpServer<T = unknown>(body: {
+    name: string;
+    url?: string;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    auth?: string;
+    profile?: string;
+  }): Promise<T> {
+    return this.post<T>("/api/mcp/servers", body);
+  }
+
+  /** DELETE /api/mcp/servers/{name}?profile= */
+  removeMcpServer<T = unknown>(name: string, profile?: string): Promise<T> {
+    const q = profile ? `?profile=${encodeURIComponent(profile)}` : "";
+    return this.fetch<T>(`/api/mcp/servers/${encodeURIComponent(name)}${q}`, {
+      method: "DELETE",
+    });
+  }
+
+  /** POST /api/mcp/servers/{name}/test?profile= — connect + list tools, then disconnect. */
+  testMcpServer<T = unknown>(name: string, profile?: string): Promise<T> {
+    const q = profile ? `?profile=${encodeURIComponent(profile)}` : "";
+    return this.post<T>(`/api/mcp/servers/${encodeURIComponent(name)}/test${q}`);
+  }
+
+  /** PUT /api/mcp/servers/{name}/enabled { enabled, profile? } */
+  setMcpServerEnabled<T = unknown>(
+    name: string,
+    enabled: boolean,
+    profile?: string,
+  ): Promise<T> {
+    return this.put<T>(`/api/mcp/servers/${encodeURIComponent(name)}/enabled`, {
+      enabled,
+      profile,
+    });
+  }
+
+  /** POST /api/mcp/catalog/install { name, env?, enable?, profile? } */
+  installMcpCatalogEntry<T = unknown>(body: {
+    name: string;
+    env?: Record<string, string>;
+    enable?: boolean;
+    profile?: string;
+  }): Promise<T> {
+    return this.post<T>("/api/mcp/catalog/install", body);
+  }
+
   /**
    * PUT /api/profiles/{name}/model { provider, model } — persist the profile's
    * default model (config.yaml). Both fields required (400 otherwise). Used to

@@ -12,3 +12,4 @@ app/src-tauri/gen/schemas/
 
 # app assets are synced from core/ at build time (scripts/sync-core-assets.mjs)
 app/src/assets/cofounder/
+app/src-tauri/banana_unit_economics_model.md

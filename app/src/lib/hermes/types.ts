@@ -262,6 +262,30 @@ export interface SessionCloseResult {
   closed: boolean;
 }
 
+/** session.delete result — server.py L5883 (`{"deleted": <session_id>}`). */
+export interface SessionDeleteResult {
+  deleted: string;
+}
+
+/** subagent.interrupt result — server.py L7899 (`{found, subagent_id}`). */
+export interface SubagentInterruptResult {
+  found: boolean;
+  subagent_id: string;
+}
+
+/** delegation.status active[] entry — from tools/delegate_tool.list_active_subagents. */
+export interface SubagentStatus {
+  subagent_id: string;
+  parent_id?: string;
+  depth?: number;
+  goal?: string;
+  model?: string;
+  started_at?: number;
+  tool_count?: number;
+  status?: string;
+  [k: string]: unknown;
+}
+
 /** approval.respond result — server.py L9756. */
 export interface ApprovalRespondResult {
   resolved: unknown;

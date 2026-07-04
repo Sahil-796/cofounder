@@ -9,6 +9,7 @@ import { hermesRest } from "@/lib/hermes";
 import { ROLES } from "@/lib/cofounder/roles";
 import { CONNECTORS } from "@/lib/cofounder/assets";
 import { joinPath } from "@/lib/cofounder/bootstrap";
+import FileViewer from "@/views/library/FileViewer";
 
 interface FsEntry {
   name: string;
@@ -72,6 +73,8 @@ function WorkspaceBrowser({ root }: { root: string }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [file, setFile] = useState<{ path: string; content: string } | null>(null);
+  const [fileLoading, setFileLoading] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
 
   useEffect(() => setCwd(root), [root]);
 
@@ -104,11 +107,16 @@ function WorkspaceBrowser({ root }: { root: string }) {
   }, [cwd, load]);
 
   const openFile = async (path: string) => {
+    setFile({ path, content: "" });
+    setFileLoading(true);
+    setFileError(null);
     try {
       const res = await hermesRest.fsReadText<{ content?: string }>(path);
       setFile({ path, content: res.content ?? "" });
     } catch (err) {
-      setFile({ path, content: `Could not read file: ${String(err)}` });
+      setFileError(String(err));
+    } finally {
+      setFileLoading(false);
     }
   };
 
@@ -137,15 +145,24 @@ function WorkspaceBrowser({ root }: { root: string }) {
               {file.path.split("/").pop()}
             </span>
             <button
-              onClick={() => setFile(null)}
+              onClick={() => {
+                setFile(null);
+                setFileError(null);
+              }}
               className="text-[12px] text-[#8a8a92] hover:text-[#e7e7ea]"
             >
               ✕ close
             </button>
           </div>
-          <pre className="flex-1 overflow-auto whitespace-pre-wrap p-3 text-[12px] leading-relaxed text-[#cfcfd4]">
-            {file.content || "(empty)"}
-          </pre>
+          {fileLoading ? (
+            <div className="flex-1 p-3 text-[12.5px] text-[#6a6a72]">Loading…</div>
+          ) : fileError ? (
+            <div className="flex-1 p-3 text-[12.5px] text-[#8a8a92]">
+              Could not read file: {fileError}
+            </div>
+          ) : (
+            <FileViewer path={file.path} content={file.content} />
+          )}
         </div>
       ) : loading ? (
         <div className="text-[12.5px] text-[#6a6a72]">Loading…</div>

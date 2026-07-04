@@ -131,9 +131,10 @@ export async function runBootstrap(opts: BootstrapOptions): Promise<void> {
     }
   }
 
-  // Step 2 — SOUL.md (full overwrite, always safe)
+  // Step 2 — SOUL.md (full overwrite, always safe). Rendered with the
+  // founder's actual workspace root so agents never fall back to a default.
   set("soul", "running");
-  await hermesRest.putSoul(COFOUNDER_PROFILE, SOUL_MD);
+  await hermesRest.putSoul(COFOUNDER_PROFILE, renderSoul(workspaceRoot));
   set("soul", "done");
 
   // Step 3 — the five role skills
@@ -374,6 +375,40 @@ function topLevelInsertIndex(lines: string[]): number {
   // Skip the indented children of the model block.
   while (i < lines.length && /^\s+\S/.test(lines[i])) i++;
   return i;
+}
+
+/**
+ * Render the orchestrator SOUL with the founder's configured environment
+ * appended. The SOUL prose points agents at this section for the workspace
+ * root, so the configured path — not a hardcoded default — is what they use.
+ */
+export function renderSoul(workspaceRoot: string): string {
+  const section = [
+    "",
+    "## Configured environment",
+    "",
+    `- **Workspace root:** \`${workspaceRoot}\``,
+    "- All workspace reads and writes use this path. Do not use any other",
+    "  location for company files.",
+    "",
+  ].join("\n");
+  return `${SOUL_MD.replace(/\s*$/, "\n")}${section}`;
+}
+
+/**
+ * Self-heal for installs bootstrapped before the SOUL carried the configured
+ * workspace root: if the live SOUL is missing the environment section (or has
+ * a stale root), rewrite it. Cheap no-op otherwise; safe to call on startup.
+ */
+export async function ensureSoulCurrent(workspaceRoot: string): Promise<void> {
+  const desired = renderSoul(workspaceRoot);
+  try {
+    const res = await hermesRest.getSoul<{ content?: string }>(COFOUNDER_PROFILE);
+    if ((res.content ?? "") === desired) return;
+  } catch {
+    /* unreadable — fall through and write */
+  }
+  await hermesRest.putSoul(COFOUNDER_PROFILE, desired);
 }
 
 /** Join a root and a relative path with a single slash (no Node path in browser). */
