@@ -65,6 +65,10 @@ export default function RightPanel({
             onOpenAgent={() => setDept({ id: dept.id, view: "agent" })}
             onOpenTasks={() => setDept({ id: dept.id, view: "tasks" })}
             onOpenScratchpad={() => setDept({ id: dept.id, view: "scratchpad" })}
+            onOpenChat={(agentId) => {
+              setDept(null);
+              onOpenAgentChat(agentId);
+            }}
           />
         )}
         {dept.view === "agent" && (

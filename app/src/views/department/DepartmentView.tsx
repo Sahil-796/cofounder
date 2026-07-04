@@ -6,7 +6,9 @@
  * reference screenshot. "Agents" drills into AgentWorkspaceView; "Tasks" and
  * "Scratchpad" drill into their own department-scoped pages (DepartmentTasksView
  * / DepartmentScratchpadView) rather than bouncing out to the generic Tasks /
- * Company tabs that show every department at once.
+ * Company tabs that show every department at once. A "Chat" button in the
+ * header jumps straight into this department's real chat without going
+ * through the Agents sub-page first.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -20,6 +22,7 @@ export default function DepartmentView({
   onOpenAgent,
   onOpenTasks,
   onOpenScratchpad,
+  onOpenChat,
 }: {
   deptId: string;
   onBack: () => void;
@@ -28,6 +31,8 @@ export default function DepartmentView({
   onOpenTasks: () => void;
   /** Open this department's own scoped scratchpad page (DepartmentScratchpadView). */
   onOpenScratchpad: () => void;
+  /** Jump straight into this department's real chat (skips the Agents sub-page). */
+  onOpenChat: (agentId: string) => void;
 }) {
   const role = ROLES.find((r) => r.id === deptId);
   const [tasks, setTasks] = useState<KanbanTask[] | null>(null);
@@ -82,6 +87,18 @@ export default function DepartmentView({
               {role.emoji}
             </span>
             <h1 className="text-[19px] font-semibold text-[#f0f0f2]">{role.label}</h1>
+            <button
+              onClick={() => role.skill && onOpenChat(deptId)}
+              disabled={!role.skill}
+              title={role.skill ? `Chat with ${role.label}` : "No agent installed for this department yet."}
+              className={`ml-auto flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11.5px] font-medium transition ${
+                role.skill
+                  ? "bg-[#222327] text-[#e4e4e8] hover:bg-[#2a2b30]"
+                  : "cursor-not-allowed bg-[#1a1b1e] text-[#5f5f67]"
+              }`}
+            >
+              💬 Chat
+            </button>
           </div>
           <p className="max-w-xl text-[12.5px] leading-relaxed text-[#9a9aa2]">{role.deptBlurb}</p>
         </div>
