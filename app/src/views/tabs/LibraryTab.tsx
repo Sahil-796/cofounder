@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import { hermesRest } from "@/lib/hermes";
 import SkillsSection from "@/views/library/SkillsSection";
 import ConnectorsSection from "@/views/library/ConnectorsSection";
+import SettingsSection from "@/views/settings/SettingsSection";
 
 interface MemoryProvider {
   name: string;
@@ -84,6 +85,11 @@ export default function LibraryTab() {
           </div>
         )}
       </section>
+
+      <div className="mt-7">
+        <SettingsSection />
+      </div>
+
       <div className="h-4" />
     </div>
   );

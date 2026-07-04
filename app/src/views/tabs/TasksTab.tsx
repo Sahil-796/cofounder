@@ -3,11 +3,16 @@
  *
  * Board: columns To do (triage/todo/scheduled) · Ready · Running (+review) ·
  * Done (blocked shown with a badge). Cards show the task title (never the raw
- * id), an assignee role chip, and a relative age; clicking a card opens the
- * detail drawer with a per-task transcript. A "Show archived" toggle refetches
- * with archived tasks; the refresh button spins while loading and a
+ * id), a delegator → assignee chip, and a relative age; clicking a card opens
+ * the detail drawer with a per-task transcript. A "Show archived" toggle
+ * refetches with archived tasks; the refresh button spins while loading and a
  * "updated Xs ago" hint shows freshness. The board also refreshes instantly on
  * kanban tool / message / subagent completion events (see state/tasks.ts).
+ *
+ * A "By status" / "By department" segmented toggle switches the grouping: by
+ * status keeps the 4-column kanban view; by department groups the same cards
+ * under role headers (Operations, Marketing, …) plus an "Unassigned /
+ * Cofounder" bucket, each card still showing its status dot.
  *
  * Activity: live + past delegated runs and chat-session management (see
  * DelegationsView).
@@ -21,7 +26,13 @@ import {
   type BoardColumn,
   type KanbanTask,
 } from "@/lib/cofounder/extraRest";
-import { roleEmoji, roleLabel } from "@/lib/cofounder/roles";
+import {
+  roleEmoji,
+  roleLabel,
+  delegatorEmoji,
+  delegatorLabel,
+  ROLES,
+} from "@/lib/cofounder/roles";
 import TaskDetailDrawer from "@/views/tasks/TaskDetailDrawer";
 import NewTaskModal from "@/views/tasks/NewTaskModal";
 import DelegationsView from "@/views/tasks/DelegationsView";
@@ -35,7 +46,32 @@ const COLUMNS: { key: BoardColumn; label: string; dot: string }[] = [
   { key: "done", label: "Done", dot: "#7ad39a" },
 ];
 
+/** Dot color per board column, keyed for quick lookup on a per-card status dot. */
+const COLUMN_DOT: Record<BoardColumn, string> = Object.fromEntries(
+  COLUMNS.map((c) => [c.key, c.dot]),
+) as Record<BoardColumn, string>;
+
 type SubTab = "board" | "activity";
+type GroupMode = "status" | "department";
+
+const UNASSIGNED_DEPT = "__unassigned__";
+
+/** Department buckets for the "By department" view: every role, plus a
+ * trailing Cofounder/unassigned catch-all. */
+const DEPARTMENTS: { id: string; label: string; emoji: string; color: string }[] = [
+  ...ROLES.map((r) => ({ id: r.id, label: r.label, emoji: r.emoji, color: r.color })),
+  { id: UNASSIGNED_DEPT, label: "Unassigned / Cofounder", emoji: "🌻", color: "#e8c37a" },
+];
+
+/** Which department bucket a task's assignee belongs to. */
+function departmentForAssignee(assignee: string | null): string {
+  if (!assignee) return UNASSIGNED_DEPT;
+  const key = assignee.toLowerCase();
+  for (const r of ROLES) {
+    if (key === r.id || key.endsWith(`/${r.id}`) || key.includes(r.id)) return r.id;
+  }
+  return UNASSIGNED_DEPT;
+}
 
 export default function TasksTab() {
   const {
@@ -50,6 +86,7 @@ export default function TasksTab() {
   } = useTasks();
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const [subTab, setSubTab] = useState<SubTab>("board");
+  const [groupMode, setGroupMode] = useState<GroupMode>("status");
   const [selected, setSelected] = useState<KanbanTask | null>(null);
   const [creating, setCreating] = useState(false);
   // Re-render the "updated Xs ago" hint every few seconds.
@@ -82,6 +119,16 @@ export default function TasksTab() {
     return m;
   }, [kanban]);
 
+  const byDept = useMemo(() => {
+    const m: Record<string, KanbanTask[]> = {};
+    for (const d of DEPARTMENTS) m[d.id] = [];
+    for (const t of kanban) m[departmentForAssignee(t.assignee)].push(t);
+    for (const k of Object.keys(m)) {
+      m[k].sort((a, b) => taskAgeMs(b) - taskAgeMs(a));
+    }
+    return m;
+  }, [kanban]);
+
   return (
     <div className="flex h-full flex-col">
       {/* Toolbar */}
@@ -108,6 +155,27 @@ export default function TasksTab() {
             <span className="text-[10.5px] text-[#5f5f67]">
               {lastUpdated ? `updated ${relativeAge(lastUpdated) || "just now"}` : ""}
             </span>
+            <div className="flex items-center gap-1 rounded-lg border border-[#1f2024] bg-[#141518] p-0.5">
+              {(
+                [
+                  { key: "status", label: "By status" },
+                  { key: "department", label: "By department" },
+                ] as { key: GroupMode; label: string }[]
+              ).map((opt) => (
+                <button
+                  key={opt.key}
+                  onClick={() => setGroupMode(opt.key)}
+                  className={
+                    "rounded-md px-2 py-1 text-[10.5px] font-medium transition " +
+                    (groupMode === opt.key
+                      ? "bg-[#222327] text-[#e4e4e8]"
+                      : "text-[#8a8a92] hover:text-[#c7c7cd]")
+                  }
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
             <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-[#8a8a92]">
               <input
                 type="checkbox"
@@ -163,7 +231,7 @@ export default function TasksTab() {
                 + New task
               </button>
             </div>
-          ) : (
+          ) : groupMode === "status" ? (
             <div className="grid grid-cols-4 gap-2.5">
               {COLUMNS.map((col) => {
                 const items = byCol[col.key];
@@ -200,6 +268,49 @@ export default function TasksTab() {
                 );
               })}
             </div>
+          ) : (
+            <div className="grid grid-cols-3 gap-3">
+              {DEPARTMENTS.map((dept) => {
+                const items = byDept[dept.id];
+                return (
+                  <div
+                    key={dept.id}
+                    className="flex flex-col rounded-xl border border-[#1f2024] bg-[#141518] p-2.5"
+                  >
+                    <div className="mb-2 flex items-center gap-1.5 px-0.5">
+                      <span
+                        className="flex h-4 w-4 items-center justify-center rounded-full text-[10px]"
+                        style={{ background: dept.color + "26" }}
+                      >
+                        {dept.emoji}
+                      </span>
+                      <span className="text-[10.5px] font-semibold uppercase tracking-wide text-[#8a8a92]">
+                        {dept.label}
+                      </span>
+                      <span className="text-[10.5px] text-[#5f5f67]">
+                        {items.length}
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      {items.length === 0 ? (
+                        <div className="rounded-lg border border-dashed border-[#1f2024] px-2 py-4 text-center text-[11px] text-[#5a5a62]">
+                          —
+                        </div>
+                      ) : (
+                        items.map((t) => (
+                          <TaskCardView
+                            key={t.id}
+                            task={t}
+                            onClick={() => setSelected(t)}
+                            statusDot={COLUMN_DOT[columnForStatus(t.status)]}
+                          />
+                        ))
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
       )}
@@ -220,9 +331,13 @@ export default function TasksTab() {
 function TaskCardView({
   task,
   onClick,
+  statusDot,
 }: {
   task: KanbanTask;
   onClick: () => void;
+  /** When set (department grouping), shows a status dot next to the title —
+   * status is implicit from the column in the default "By status" view. */
+  statusDot?: string;
 }) {
   const blocked = task.status === "blocked";
   return (
@@ -230,17 +345,31 @@ function TaskCardView({
       onClick={onClick}
       className="rounded-lg border border-[#222327] bg-[#141518] p-2.5 text-left transition hover:border-[#2e2f34] hover:bg-[#17181b]"
     >
-      <div className="mb-1.5 line-clamp-3 text-[12px] leading-snug text-[#d0d0d5]">
-        {task.title}
+      <div className="mb-1.5 flex items-start gap-1.5">
+        {statusDot && (
+          <span
+            className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full"
+            style={{ background: statusDot }}
+            title={task.status}
+          />
+        )}
+        <div className="line-clamp-3 text-[12px] leading-snug text-[#d0d0d5]">
+          {task.title}
+        </div>
       </div>
-      <div className="flex items-center justify-between gap-1">
-        <span
-          className="inline-flex items-center gap-1 rounded-full bg-[#202127] px-1.5 py-0.5 text-[10px] text-[#b6b6bc]"
-          title={roleLabel(task.assignee)}
-        >
-          <span>{roleEmoji(task.assignee)}</span>
-          <span className="max-w-[64px] truncate">{roleLabel(task.assignee)}</span>
+      <div
+        className="mb-1.5 inline-flex max-w-full items-center gap-1 truncate rounded-full bg-[#202127] px-1.5 py-0.5 text-[10px] text-[#b6b6bc]"
+        title={`Delegated by ${delegatorLabel(task.created_by)} to ${roleLabel(task.assignee)}`}
+      >
+        <span className="truncate">
+          {delegatorEmoji(task.created_by)} {delegatorLabel(task.created_by)}
         </span>
+        <span className="text-[#5f5f67]">→</span>
+        <span className="truncate">
+          {roleEmoji(task.assignee)} {roleLabel(task.assignee)}
+        </span>
+      </div>
+      <div className="flex items-center justify-end gap-1">
         <div className="flex items-center gap-1">
           {blocked && (
             <span className="rounded-full bg-[#3a1c1c] px-1.5 py-0.5 text-[9px] font-medium text-[#e08a8a]">

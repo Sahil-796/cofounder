@@ -111,8 +111,19 @@ function WorkspaceBrowser({ root }: { root: string }) {
     setFileLoading(true);
     setFileError(null);
     try {
-      const res = await hermesRest.fsReadText<{ content?: string }>(path);
-      setFile({ path, content: res.content ?? "" });
+      // NOTE: GET /api/fs/read-text returns the file body under `text`, not
+      // `content` (verified against hermes_cli/web_server.py:1887-1895 — the
+      // response is {binary, byteSize, language, mimeType, path, text,
+      // truncated}). Reading `res.content` here always resolved to undefined,
+      // so every opened file (not just .md) silently rendered as empty —
+      // this was the root cause of "can't see the md files."
+      const res = await hermesRest.fsReadText<{ text?: string; binary?: boolean }>(path);
+      if (res.binary) {
+        setFileError("Binary file — preview not supported.");
+        setFile({ path, content: "" });
+        return;
+      }
+      setFile({ path, content: res.text ?? "" });
     } catch (err) {
       setFileError(String(err));
     } finally {

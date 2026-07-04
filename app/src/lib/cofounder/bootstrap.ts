@@ -305,8 +305,10 @@ async function appendDecision(workspaceRoot: string, entry: string): Promise<voi
   const path = joinPath(workspaceRoot, ".cofounder/decisions.md");
   let existing = "";
   try {
-    const res = await hermesRest.fsReadText<{ content?: string }>(path);
-    existing = res.content ?? "";
+    // GET /api/fs/read-text returns the body under `text` (web_server.py:1893),
+    // not `content` — reading `content` would always yield "" and duplicate.
+    const res = await hermesRest.fsReadText<{ text?: string }>(path);
+    existing = res.text ?? "";
   } catch {
     /* missing — we'll create it below */
   }
@@ -330,8 +332,10 @@ async function appendDecision(workspaceRoot: string, entry: string): Promise<voi
 async function ensureToolsets(): Promise<boolean> {
   let content: string;
   try {
-    const res = await hermesRest.fsReadText<{ content?: string }>(PROFILE_CONFIG_PATH);
-    content = res.content ?? "";
+    // read-text returns the body under `text` (web_server.py:1893), not
+    // `content`; reading `content` here would always see an empty config.
+    const res = await hermesRest.fsReadText<{ text?: string }>(PROFILE_CONFIG_PATH);
+    content = res.text ?? "";
   } catch {
     // No config.yaml yet (or unreadable) — leave it to Hermes's own defaults.
     return false;

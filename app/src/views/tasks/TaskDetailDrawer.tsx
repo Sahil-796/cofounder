@@ -209,11 +209,13 @@ export default function TaskDetailDrawer({
           <Section title="Transcript">
             {liveRun ? (
               <div>
-                <div className="mb-1.5 flex items-center gap-1.5 text-[10px] text-[#e8c37a]">
+                <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-[#e8c37a]">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#e8c37a]" />
                   live
                   {liveRun.model && (
-                    <span className="text-[#6a6a72]">· {liveRun.model}</span>
+                    <span className="font-normal normal-case tracking-normal text-[#6a6a72]">
+                      · {liveRun.model}
+                    </span>
                   )}
                 </div>
                 <LiveThread entries={liveRun.entries} />
@@ -223,7 +225,7 @@ export default function TaskDetailDrawer({
             ) : history && history.length > 0 ? (
               <MessageThread messages={history} />
             ) : (
-              <div className="text-[12px] text-[#6a6a72]">
+              <div className="rounded-lg border border-dashed border-[#1f2024] px-3 py-4 text-center text-[11.5px] text-[#6a6a72]">
                 {loading
                   ? "Loading…"
                   : "No transcript is linked to this task yet. It appears once a run executes it."}
